@@ -2101,7 +2101,9 @@ def _handle_add_phone_challenge(
             if hasattr(phone_callback, "cleanup"):
                 phone_callback.cleanup()
             # 重置 phone_callback 状态为 need_number
-            if hasattr(phone_callback, "phase"):
+            if hasattr(phone_callback, "rearm"):
+                phone_callback.rearm()
+            elif hasattr(phone_callback, "phase"):
                 phone_callback.phase = "need_number"
                 phone_callback.activation = None
                 phone_callback.completed = False
@@ -2256,9 +2258,28 @@ def _do_add_phone_attempt(
     _browser_pause(page)
 
     # ---- 第4步: 点击发送按钮 ----
+    # 记录页面实际可点击文案，便于确认 OpenAI 选择的是 SMS 而不是 WhatsApp。
+    try:
+        channel_buttons = page.evaluate(
+            """
+            () => Array.from(document.querySelectorAll('button, [role="button"], a'))
+                .map(el => (el.innerText || '').trim())
+                .filter(text => text && text.length <= 60)
+                .slice(0, 20)
+            """
+        ) or []
+        log(f"  add-phone 页面可点元素: {channel_buttons}")
+    except Exception as exc:
+        log(f"  add-phone 页面元素枚举失败: {exc}")
+
     send_sel = _click_first(page, PHONE_SEND_SELECTORS, timeout=8)
     if send_sel:
         log(f"  已点击发送按钮: {send_sel}")
+        if "whatsapp" in str(send_sel).lower():
+            raise RuntimeError(
+                f"add_phone 点到了 WhatsApp 渠道: {send_sel}；"
+                "租用的是纯 SMS 号码，继续下去只会空等 180 秒"
+            )
     elif _submit_form_with_fallback(page, phone_input_sel):
         log("  未找到发送按钮，已使用表单 fallback 提交")
     else:

@@ -57,9 +57,16 @@ def build_otp_callback(
     if not mailbox or not mail_acct:
         return None
 
+    # identity.before_ids 是 identity 解析时取的一次快照，只能当“整轮注册开始前”的
+    # 地板。一轮注册会要多次码（重发、OAuth 再登录），第二次等待时上一封 OTP 邮件
+    # 仍在收件箱里、且不在这个地板里，于是被当成新邮件——回放旧验证码。
+    # 每消费掉一封就把地板抬到“此刻收件箱里的全部邮件”。抬的时机在拿到码之后，
+    # 所以不会像“等待前才快照”那样把已经躺在收件箱里的目标邮件一起挡掉。
+    floor_ids = {"value": set(getattr(ctx.identity, "before_ids", set()) or set())}
+
     def otp_cb():
         ctx.log(wait_message)
-        kwargs = {"keyword": keyword, "before_ids": getattr(ctx.identity, "before_ids", set())}
+        kwargs = {"keyword": keyword, "before_ids": set(floor_ids["value"])}
         if timeout is not None:
             kwargs["timeout"] = timeout
         if code_pattern:
@@ -67,6 +74,10 @@ def build_otp_callback(
         code = mailbox.wait_for_code(mail_acct, **kwargs)
         if code:
             ctx.log(f"{success_label}: {code}")
+            try:
+                floor_ids["value"] = set(mailbox.get_current_ids(mail_acct) or set())
+            except Exception as exc:
+                ctx.log(f"刷新收件箱地板失败，下一轮 OTP 可能重复: {exc}")
         return code
 
     return otp_cb

@@ -12,9 +12,18 @@ class _MailboxEmailService:
         self._mailbox = mailbox
         self._mailbox_account = mailbox_account
         self._acct = None
+        self._floor_ids: set = set()
+
+    def _snapshot_ids(self, acct) -> set:
+        try:
+            return set(self._mailbox.get_current_ids(acct) or set())
+        except Exception:
+            return set()
 
     def create_email(self, config=None):
         self._acct = self._mailbox_account
+        # 注册开始前收件箱里已有的邮件一律不算数
+        self._floor_ids = self._snapshot_ids(self._acct)
         return {
             "email": self._mailbox_account.email,
             "service_id": getattr(self._mailbox_account, "account_id", ""),
@@ -23,7 +32,18 @@ class _MailboxEmailService:
 
     def get_verification_code(self, email=None, email_id=None, timeout=120, pattern=None, otp_sent_at=None):
         acct = self._acct or self._mailbox_account
-        return self._mailbox.wait_for_code(acct, keyword="", timeout=timeout, code_pattern=pattern)
+        # 原来这里既不传 before_ids 也不用 otp_sent_at（签名收下就丢掉），
+        # 于是 RegistrationEngine 第二次要码时立刻命中第一封邮件里的旧验证码。
+        code = self._mailbox.wait_for_code(
+            acct,
+            keyword="",
+            timeout=timeout,
+            before_ids=set(self._floor_ids),
+            code_pattern=pattern,
+        )
+        if code:
+            self._floor_ids = self._snapshot_ids(acct)
+        return code
 
     def update_status(self, success, error=None):
         return None

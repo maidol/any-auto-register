@@ -186,7 +186,11 @@ class SmsActivateProvider(BaseSmsProvider):
 # ---------------------------------------------------------------------------
 
 HERO_SMS_DEFAULT_SERVICE = "dr"
-HERO_SMS_DEFAULT_COUNTRY = "187"
+# 187 = 美国。OpenAI 对美国号走 WhatsApp，租来的纯 SMS 号收不到码。
+# 52 = 泰国，是 HeroSmsProvider.get_best_country 的 ALLOWED_COUNTRIES 里
+# 唯一一个已验证仍走 SMS 的国家——那份白名单只在 herosms_auto_country 打开时
+# 才会被读到，默认关闭，所以这个默认值必须自己是对的。
+HERO_SMS_DEFAULT_COUNTRY = "52"
 HERO_SMS_PHONE_LIFETIME = 20 * 60
 _HERO_SMS_CACHE_LOCK = threading.Lock()
 _HERO_SMS_VERIFY_LOCK = threading.RLock()
@@ -1121,7 +1125,18 @@ class PhoneCallbackController:
             self.provider = create_sms_provider(self.provider_key, self.config)
         return self.provider
 
+    def rearm(self) -> None:
+        """把控制器复位到可以再租一个号的状态（不释放已完成的号）。"""
+        self.activation = None
+        self.completed = False
+        self.awaiting_external_success = False
+        self.phase = "need_number"
+
     def __call__(self) -> str:
+        if self.phase == "done":
+            # 注册浏览器已经完成验证，OAuth 全新浏览器可能还需要再租一个号。
+            self.log("phone_callback 已完成过一轮验证，重新进入租号阶段")
+            self.rearm()
         provider = self._provider()
         if self.phase == "need_number":
             if self.provider_key == "herosms" and not self._verify_lock_acquired:
