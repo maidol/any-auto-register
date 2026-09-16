@@ -11,7 +11,8 @@ import pytest
 
 
 class _FakeMailbox:
-    """收件箱随邮件到达而增长；wait_for_code 返回第一封不在 before_ids 里的邮件。"""
+    """收件箱随邮件到达而增长；wait_for_code 返回第一封不在 before_ids 里的邮件，
+    模拟 core/base_mailbox.py 里全部 provider 的行为。"""
 
     def __init__(self):
         self.mails = []
@@ -45,6 +46,8 @@ def _ctx_with(mailbox, before_ids):
 
 
 def test_otp_callback_second_call_must_not_return_the_first_otp():
+    """注册发了第一封 OTP，之后 OAuth 再登录发了第二封。
+    第二次等待不能把第一封里的码交回去。"""
     from core.registration.helpers import build_otp_callback
 
     mailbox = _FakeMailbox()
@@ -75,6 +78,7 @@ def test_protocol_mailbox_service_does_not_replay_the_previous_otp():
 
 
 def test_phone_callback_controller_is_reusable_after_success():
+    """注册浏览器过完手机验证后，OAuth 全新浏览器复用同一个 controller。"""
     from core.base_sms import PhoneCallbackController, SmsActivation
 
     ctrl = PhoneCallbackController("herosms", {}, service="dr", country="52")
@@ -88,7 +92,10 @@ def test_phone_callback_controller_is_reusable_after_success():
     ctrl.phase = "done"
     ctrl.completed = True
 
-    assert ctrl() != "", "second browser got an empty string, not a number and not an error"
+    try:
+        assert ctrl() != "", "second browser got an empty string, not a number and not an error"
+    finally:
+        ctrl.cleanup()
 
 
 def test_chatgpt_payment_module_imports():
@@ -98,6 +105,7 @@ def test_chatgpt_payment_module_imports():
 
 
 def test_chatgpt_check_valid_reports_plan_from_subscription_details(monkeypatch):
+    """一个活着的 Plus 账号必须被判成有效。"""
     from core.base_platform import RegisterConfig
     from platforms.chatgpt.plugin import ChatGPTPlatform
 

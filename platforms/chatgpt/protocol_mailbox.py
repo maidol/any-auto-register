@@ -32,6 +32,8 @@ class _MailboxEmailService:
 
     def get_verification_code(self, email=None, email_id=None, timeout=120, pattern=None, otp_sent_at=None):
         acct = self._acct or self._mailbox_account
+        # 等待前的快照只作为成功后的地板下限，不能作为 before_ids 传入。
+        pre_ids = self._snapshot_ids(acct)
         # 原来这里既不传 before_ids 也不用 otp_sent_at（签名收下就丢掉），
         # 于是 RegistrationEngine 第二次要码时立刻命中第一封邮件里的旧验证码。
         code = self._mailbox.wait_for_code(
@@ -42,7 +44,8 @@ class _MailboxEmailService:
             code_pattern=pattern,
         )
         if code:
-            self._floor_ids = self._snapshot_ids(acct)
+            # 只升不降：快照失败时返回空集，不能清空已有地板。
+            self._floor_ids |= pre_ids | self._snapshot_ids(acct)
         return code
 
     def update_status(self, success, error=None):

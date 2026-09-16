@@ -54,7 +54,9 @@ class TestCreateSmsProvider:
         assert isinstance(provider, HeroSmsProvider)
         assert provider.api_key == "hero123"
         assert provider.default_service == "dr"
-        assert provider.default_country == "187"
+        # 默认国家 2026-09-16 起是 52(泰国)：OpenAI 对美国号(187)走 WhatsApp，
+        # 租来的纯 SMS 号收不到码。见 core/base_sms.py:186-190 的注释。
+        assert provider.default_country == "52"
 
     def test_herosms_reuse_flag_parses_string_false(self):
         provider = create_sms_provider(

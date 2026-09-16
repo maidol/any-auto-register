@@ -64,8 +64,17 @@ def build_otp_callback(
     # 所以不会像“等待前才快照”那样把已经躺在收件箱里的目标邮件一起挡掉。
     floor_ids = {"value": set(getattr(ctx.identity, "before_ids", set()) or set())}
 
+    def _snapshot_ids() -> set:
+        try:
+            return set(mailbox.get_current_ids(mail_acct) or set())
+        except Exception as exc:
+            ctx.log(f"刷新收件箱地板失败: {exc}")
+            return set()
+
     def otp_cb():
         ctx.log(wait_message)
+        # 等待前的快照只作为成功后的地板下限，不能作为 before_ids 传入。
+        pre_ids = _snapshot_ids()
         kwargs = {"keyword": keyword, "before_ids": set(floor_ids["value"])}
         if timeout is not None:
             kwargs["timeout"] = timeout
@@ -74,10 +83,8 @@ def build_otp_callback(
         code = mailbox.wait_for_code(mail_acct, **kwargs)
         if code:
             ctx.log(f"{success_label}: {code}")
-            try:
-                floor_ids["value"] = set(mailbox.get_current_ids(mail_acct) or set())
-            except Exception as exc:
-                ctx.log(f"刷新收件箱地板失败，下一轮 OTP 可能重复: {exc}")
+            # 只升不降：快照失败时返回空集，不能清空已有地板。
+            floor_ids["value"] |= pre_ids | _snapshot_ids()
         return code
 
     return otp_cb
