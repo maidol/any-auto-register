@@ -621,6 +621,37 @@ def _scan_channel_options(page) -> list:
     return [r for r in (rows or []) if isinstance(r, dict)]
 
 
+def _looks_like_submit_control(row: dict) -> bool:
+    """这一行是不是提交按钮。type="submit" 是唯一可靠的显式信号。"""
+    attrs = (row or {}).get("attrs") or {}
+    return str(attrs.get("type") or "").strip().lower() == "submit"
+
+
+def _channel_candidate_rows(rows: list) -> list:
+    """从扫描结果里挑出真正**表达得出一个选择**的那些行。
+
+    只按文案匹配分不清「渠道选项」和「文案里恰好带 SMS 的提交按钮」——
+    `Send code via SMS` 就是 PHONE_SEND_SELECTORS 的第 1 条，
+    把它当渠道选项点下去等于提前把号提交出去。两条收紧判据：
+
+    1. 只要有任何一行表达得出选中态，就只在这些行里挑：单选组有
+       aria-checked / data-state，提交按钮没有；
+    2. 一行都没有选中态时（兜底路径），要求**至少两个候选**并排除
+       type="submit"——一个选择至少要有两个候选，只有一行的「选择」不是选择。
+    """
+    rows = [
+        r for r in (rows or [])
+        if isinstance(r, dict) and not _looks_like_submit_control(r)
+    ]
+    stateful = [r for r in rows if _channel_selected_state(r) is not None]
+    if stateful:
+        return stateful
+    candidates = rows
+    if len(candidates) < 2:
+        return []
+    return candidates
+
+
 def _pick_channel_row(rows: list, kind: str):
     for row in rows:
         if _channel_kind(row) == kind:
@@ -665,7 +696,7 @@ def _select_sms_channel_ui(page, log) -> str:
       只有 WhatsApp 没有 Text（这个号在这一版页面上拿不到短信，应当换号）；
       或者点了 Text 但页面没有任何变化（点空了，不能当成选上了）。
     """
-    rows = _wait_for_channel_options(page, log)
+    rows = _channel_candidate_rows(_wait_for_channel_options(page, log))
     wa_row = _pick_channel_row(rows, "whatsapp")
     text_row = _pick_channel_row(rows, "text")
 
@@ -702,7 +733,7 @@ def _select_sms_channel_ui(page, log) -> str:
     except Exception:
         time.sleep(0.3)
 
-    after_rows = _scan_channel_options(page)
+    after_rows = _channel_candidate_rows(_scan_channel_options(page))
     after_text = _pick_channel_row(after_rows, "text")
     if after_text is None:
         raise RuntimeError("点击 Text 渠道后页面上找不到 Text 选项了")
@@ -750,7 +781,7 @@ def _verify_sms_channel_from_session(page, log) -> str:
         return "sms"
     raise RuntimeError(
         f"服务端认定的验证渠道是 {channel}，不是 sms；"
-        "租用的是纯 SMS 号码，继续下去只会空等 180 秒"
+        "租用的是纯 SMS 号码，继续下去只会空等 180 秒，应当换号重试"
     )
 
 

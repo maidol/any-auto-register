@@ -364,3 +364,138 @@ def test_dead_selector_string_guard_is_gone():
 def test_whatsapp_only_error_triggers_number_rotation():
     src = _source_of(br._handle_add_phone_challenge)
     assert "应当换号重试" in src, "只有 WhatsApp 时抛出的错要能触发换号重试"
+
+
+# ==========================================================================
+# 第 6 步（F1）：扫描器必须分得清「渠道选项」和「文案里带 SMS 的提交按钮」
+#
+# `Send code via SMS` 不是渠道选项的文案，它是 PHONE_SEND_SELECTORS 的第 1 条，
+# 即某一版页面的**提交按钮**。把它当渠道选项点下去＝提前提交，号真的发出去了。
+# ==========================================================================
+
+def _page_sms_submit_button_only():
+    """没有渠道单选组，提交按钮的文案恰好带 SMS（multi_channel_allowed 为假那一侧）。"""
+    return FakePage([
+        FakeNode("Send code via SMS", {"type": "submit"}),
+    ])
+
+
+def _page_input_sms_submit_button_only():
+    """input 提交控件会被扫描器标记为 checked=false，也不能成为渠道候选。"""
+    return FakePage([
+        FakeNode("Send code via SMS", {"type": "submit", ".checked": "false"}, tag="INPUT"),
+    ])
+
+
+def test_input_submit_control_is_not_a_channel_option():
+    page = _page_input_sms_submit_button_only()
+    assert br._select_sms_channel_ui(page, _log) == "none"
+    assert page.clicked == []
+
+
+def _page_submit_button_before_radio_group():
+    """有单选组，但带 SMS 文案的提交按钮在 DOM 里排在它前面。"""
+    return FakePage([
+        FakeNode("Send code via SMS", {"type": "submit"}),
+        FakeNode("WhatsApp", {"role": "radio", "data-state": "checked"}),
+        FakeNode("Text message", {"role": "radio", "data-state": "unchecked"}),
+    ])
+
+
+class _StatelessTogglePage(FakePage):
+    """页面不用任何标准选中态属性，点击后只有 class 变——兜底路径就是为它准备的。"""
+
+    def _apply_radio_click(self, node):
+        for other in self.nodes:
+            other.attrs["class"] = "opt selected" if other is node else "opt"
+
+
+def _page_stateless_two_options():
+    return _StatelessTogglePage([
+        FakeNode("WhatsApp", {"class": "opt selected"}),
+        FakeNode("Text message", {"class": "opt"}),
+    ])
+
+
+def test_sms_labelled_submit_button_is_not_a_channel_option():
+    """只有一个候选时那不是「选择」，必须落回 none 走原流程，一次都不能点。"""
+    page = _page_sms_submit_button_only()
+    assert br._select_sms_channel_ui(page, _log) == "none"
+    assert page.clicked == [], "提交按钮不是渠道选项，点它等于提前把号提交出去"
+
+
+def test_picks_the_radio_not_the_sms_labelled_submit_button():
+    """有带选中态的行时，只在这些行里挑——提交按钮没有选中态。"""
+    page = _page_submit_button_before_radio_group()
+    assert br._select_sms_channel_ui(page, _log) == "text"
+    assert [n.text for n in page.clicked] == ["Text message"], (
+        f"点错了节点: {[n.text for n in page.clicked]}"
+    )
+    assert page.nodes[2].attrs["data-state"] == "checked"
+    assert page.nodes[1].attrs["data-state"] == "unchecked"
+
+
+def test_stateless_fallback_still_selects_with_two_candidates():
+    """**改前改后都必须绿**：新判据不许把「没有标准选中态」的兜底路径关掉。"""
+    page = _page_stateless_two_options()
+    assert br._select_sms_channel_ui(page, _log) == "text"
+    assert [n.text for n in page.clicked] == ["Text message"]
+
+
+# ==========================================================================
+# 第 7 步（F2）：服务端认定 whatsapp 时，要换号重试，不是整轮结束
+#
+# 这条测试**不复制错误文案**：先让真的 _verify_sms_channel_from_session 抛，
+# 拿它的原句去喂 _handle_add_phone_challenge。文案改了测试跟着走。
+# ==========================================================================
+
+class _NavPage(FakePage):
+    """换号重试会 page.goto 回 add-phone。"""
+
+    def goto(self, *args, **kwargs):
+        return None
+
+
+class _StubPhoneCallback:
+    def __init__(self):
+        self.cleanups = 0
+        self.rearms = 0
+
+    def __call__(self):
+        return "+8613800000000"
+
+    def cleanup(self):
+        self.cleanups += 1
+
+    def rearm(self):
+        self.rearms += 1
+
+
+def test_server_side_whatsapp_verdict_triggers_number_rotation(monkeypatch):
+    page = FakePage([], cookies=_session_cookie(
+        {"phone_verification_channel": "whatsapp"}
+    ))
+    with pytest.raises(RuntimeError) as exc:
+        br._verify_sms_channel_from_session(page, _log)
+    message = str(exc.value)
+
+    attempts = []
+
+    def _fake_attempt(_page, _phone_callback, **_kwargs):
+        attempts.append(1)
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(br, "_do_add_phone_attempt", _fake_attempt)
+    monkeypatch.setattr(br.time, "sleep", lambda *_a, **_k: None)
+
+    callback = _StubPhoneCallback()
+    with pytest.raises(RuntimeError):
+        br._handle_add_phone_challenge(
+            _NavPage([]), callback,
+            device_id="d", user_agent="ua", log=_log, max_phone_attempts=3,
+        )
+
+    assert len(attempts) == 3, (
+        f"服务端认定 whatsapp 必须换号重试，实际只尝试了 {len(attempts)} 次就整轮结束"
+    )
+    assert callback.cleanups == 3 and callback.rearms == 3
