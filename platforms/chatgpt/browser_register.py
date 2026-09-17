@@ -163,16 +163,22 @@ PHONE_INPUT_SELECTORS = [
     'input[autocomplete="tel-national"]',
 ]
 
+# 顺序有意义：精确文案在前，泛化兜底在后。
+# `:has-text()` 是子串匹配，`button:has-text("Send code")` 会命中
+# "Send code via WhatsApp"，`Continue` / `submit` 在渠道页上更是点谁都算。
+# 泛化的排在前面就会抢先命中 WhatsApp 那一个，而 `_click_first` 只回传
+# 选择器字符串，事后谁也看不出点中的是什么。
 PHONE_SEND_SELECTORS = [
     'button:has-text("Send code via SMS")',
-    'button:has-text("Send code")',
     'button:has-text("Send via SMS")',
     'button:has-text("Send link via SMS")',
+    'button:has-text("发送")',
+    # 以下都是泛化兜底，必须留在最后
+    'button:has-text("Send code")',
     'button:has-text("Send")',
     'button[type="submit"]',
     'button:has-text("Continue")',
     'button:has-text("continue")',
-    'button:has-text("发送")',
 ]
 
 PHONE_VERIFY_SELECTORS = [
@@ -513,6 +519,239 @@ def _select_phone_country_ui(page, dial_code: str, country_name: str, log) -> bo
     except Exception:
         pass
     return False
+
+
+# ---------------------------------------------------------------------------
+# add-phone 页面的验证渠道（Text / WhatsApp）
+#
+# multi_channel_allowed 为真时，这一页会同时给出 WhatsApp 和 Text 两个渠道，
+# 默认选中 WhatsApp。租来的是纯 SMS 号码，走 WhatsApp 收不到码，现象是
+# 空等 180 秒并连烧 3 个号，而真正的原因不出现在任何日志里。
+#
+# 这里不预写任何选择器：选中态藏在 aria-checked / data-state / class 里哪一个
+# 因页面版本而异，所以扫描时把整份 attributes 原样带回来，再按已知键判断，
+# 已知键都不在就退回"点击前后有没有变化"。
+# ---------------------------------------------------------------------------
+
+CHANNEL_NODE_SELECTOR = (
+    'button,[role="button"],a,input,label,'
+    '[role="radio"],[role="option"],[role="tab"],[role="switch"]'
+)
+
+CHANNEL_SCAN_JS = """
+/*CHANNEL_SCAN*/
+(rootSelector) => {
+  const rx = /whatsapp|text message|短信|sms/i;
+  const out = [];
+  const nodes = Array.from(document.querySelectorAll(rootSelector));
+  for (let i = 0; i < nodes.length; i++) {
+    const el = nodes[i];
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) continue;
+    const text = ((el.innerText || el.textContent || '') + ' ' +
+                  (el.getAttribute('aria-label') || '') + ' ' +
+                  (el.value || '')).trim();
+    if (!rx.test(text)) continue;
+    const attrs = {};
+    for (const a of el.attributes) attrs[a.name] = String(a.value).slice(0, 80);
+    if (el.checked === true) attrs['.checked'] = 'true';
+    else if (el.checked === false) attrs['.checked'] = 'false';
+    out.push({ idx: i, text: text.slice(0, 60), tag: el.tagName, attrs: attrs });
+    if (out.length >= 12) break;
+  }
+  return out;
+}
+"""
+
+CHANNEL_CLICK_JS = """
+/*CHANNEL_CLICK*/
+({ rootSelector, idx }) => {
+  const nodes = Array.from(document.querySelectorAll(rootSelector));
+  const el = nodes[idx];
+  if (!el) return false;
+  el.scrollIntoView({ block: 'center' });
+  el.click();
+  return true;
+}
+"""
+
+# 选中态可能写在这些属性里的任意一个。'.checked' 是扫描脚本为原生
+# <input type=radio> 补的伪属性。
+_CHANNEL_SELECTED_KEYS = (
+    "aria-checked", "aria-selected", "aria-pressed",
+    "data-state", "data-selected", "data-checked",
+    ".checked", "checked",
+)
+_CHANNEL_TRUE_VALUES = {"true", "1", "on", "checked", "selected", "active"}
+_CHANNEL_FALSE_VALUES = {"false", "0", "off", "unchecked", "unselected", "inactive"}
+
+_WHATSAPP_RE = re.compile(r"whatsapp", re.I)
+_TEXT_CHANNEL_RE = re.compile(r"text message|短信|\bsms\b|\btext\b", re.I)
+
+
+def _channel_kind(row: dict) -> str:
+    """这一行是哪个渠道。WhatsApp 先判，因为它的文案里也可能带 message。"""
+    text = str((row or {}).get("text") or "")
+    if _WHATSAPP_RE.search(text):
+        return "whatsapp"
+    if _TEXT_CHANNEL_RE.search(text):
+        return "text"
+    return ""
+
+
+def _channel_selected_state(row: dict):
+    """True / False / None（None＝这一版页面没用我们认识的属性表示选中）。"""
+    attrs = (row or {}).get("attrs") or {}
+    for key in _CHANNEL_SELECTED_KEYS:
+        if key not in attrs:
+            continue
+        value = str(attrs.get(key) or "").strip().lower()
+        if value in _CHANNEL_TRUE_VALUES:
+            return True
+        if value in _CHANNEL_FALSE_VALUES:
+            return False
+    return None
+
+
+def _scan_channel_options(page) -> list:
+    try:
+        rows = page.evaluate(CHANNEL_SCAN_JS, CHANNEL_NODE_SELECTOR)
+    except Exception:
+        return []
+    return [r for r in (rows or []) if isinstance(r, dict)]
+
+
+def _pick_channel_row(rows: list, kind: str):
+    for row in rows:
+        if _channel_kind(row) == kind:
+            return row
+    return None
+
+
+def _wait_for_channel_options(page, log, timeout: float = 3.0) -> list:
+    """等渠道选项这一块渲染稳定再读。
+
+    国家下拉选完之后页面会重新判断 Text 是否可选，`_browser_pause` 那 150-450ms
+    是拟人化随机停顿、不检查任何条件。判据是"连续两次扫描结果相同"，不是"睡够了"。
+    """
+    deadline = time.time() + timeout
+    previous = None
+    rows = []
+    while True:
+        rows = _scan_channel_options(page)
+        fingerprint = [(r.get("text"), r.get("attrs")) for r in rows]
+        # 空结果**不算稳定**：重算期间读到的空和"这一页真的没有渠道选项"
+        # 长得一模一样，只有等满整个窗口才分得开。
+        if rows and previous is not None and fingerprint == previous:
+            return rows
+        previous = fingerprint
+        if time.time() >= deadline:
+            log(f"  渠道: {timeout}s 内未稳定，按最后一次扫描结果继续")
+            return rows
+        try:
+            page.wait_for_timeout(250)
+        except Exception:
+            time.sleep(0.25)
+
+
+def _select_sms_channel_ui(page, log) -> str:
+    """把 add-phone 页面上的验证渠道切到 Text / 短信。
+
+    返回:
+      "text"  —— 页面上有渠道选项，且 Text 现在是选中的
+      "none"  —— 页面上没有渠道选项（multi_channel_allowed 为假），保持原流程
+
+    抛 RuntimeError:
+      只有 WhatsApp 没有 Text（这个号在这一版页面上拿不到短信，应当换号）；
+      或者点了 Text 但页面没有任何变化（点空了，不能当成选上了）。
+    """
+    rows = _wait_for_channel_options(page, log)
+    wa_row = _pick_channel_row(rows, "whatsapp")
+    text_row = _pick_channel_row(rows, "text")
+
+    if wa_row is None and text_row is None:
+        log("  渠道: 页面上没有 WhatsApp/Text 选项，按原流程提交")
+        return "none"
+
+    if text_row is None:
+        raise RuntimeError(
+            "add_phone 只提供了 WhatsApp 渠道、没有 Text/短信选项；"
+            "租用的是纯 SMS 号码，继续下去只会空等 180 秒，应当换号重试"
+        )
+
+    log(f"  渠道: 页面提供 {[str(r.get('text')) for r in rows]}")
+
+    if _channel_selected_state(text_row) is True:
+        log("  ✓ 渠道: Text 本来就是选中的，不再点击")
+        return "text"
+
+    before_attrs = {r.get("idx"): dict(r.get("attrs") or {}) for r in rows}
+    clicked = False
+    try:
+        clicked = bool(page.evaluate(
+            CHANNEL_CLICK_JS,
+            {"rootSelector": CHANNEL_NODE_SELECTOR, "idx": text_row.get("idx")},
+        ))
+    except Exception as exc:
+        raise RuntimeError(f"点击 Text 渠道失败: {exc}") from exc
+    if not clicked:
+        raise RuntimeError("点击 Text 渠道失败: 页面上找不到那个节点了")
+
+    try:
+        page.wait_for_timeout(300)
+    except Exception:
+        time.sleep(0.3)
+
+    after_rows = _scan_channel_options(page)
+    after_text = _pick_channel_row(after_rows, "text")
+    if after_text is None:
+        raise RuntimeError("点击 Text 渠道后页面上找不到 Text 选项了")
+
+    state = _channel_selected_state(after_text)
+    if state is True:
+        log("  ✓ 渠道: 已切到 Text")
+        return "text"
+    if state is False:
+        raise RuntimeError("点了 Text 渠道但它仍然不是选中态，未生效")
+
+    # 这一版页面没用我们认识的属性表示选中，退回"有没有变化"。
+    changed = any(
+        dict(r.get("attrs") or {}) != before_attrs.get(r.get("idx"))
+        for r in after_rows
+    )
+    if not changed:
+        raise RuntimeError("点了 Text 渠道但页面没有任何变化，未生效")
+    log("  ✓ 渠道: 已点 Text（页面未用标准属性表示选中，按变化判定）")
+    return "text"
+
+
+def _verify_sms_channel_from_session(page, log) -> str:
+    """读服务端在 oai-client-auth-session 里认定的渠道。
+
+    返回 "sms"，或 ""（会话里没有这个字段——不拦）。
+    读到别的非空值时抛 RuntimeError。
+    """
+    try:
+        cookies = {
+            str(c.get("name") or ""): str(c.get("value") or "")
+            for c in (page.context.cookies() or [])
+        }
+    except Exception as exc:
+        log(f"  渠道复核: 取 cookie 失败({exc})，跳过复核")
+        return ""
+
+    meta = _decode_oauth_session_cookie(cookies)
+    channel = str(meta.get("phone_verification_channel") or "").strip().lower()
+    if not channel:
+        log("  渠道复核: 会话里没有 phone_verification_channel，跳过（不拦）")
+        return ""
+    if channel == "sms":
+        log("  ✓ 渠道复核: 服务端认定 sms")
+        return "sms"
+    raise RuntimeError(
+        f"服务端认定的验证渠道是 {channel}，不是 sms；"
+        "租用的是纯 SMS 号码，继续下去只会空等 180 秒"
+    )
 
 
 def _build_proxy_config(proxy: Optional[str]) -> Optional[dict]:
@@ -2090,6 +2329,7 @@ def _handle_add_phone_challenge(
             # 验证码超时或号码已被使用时换号重试，其他错误直接抛出
             should_retry = (
                 "未获取到短信验证码" in error_msg
+                or "应当换号重试" in error_msg
                 or "phone_number_in_use" in error_msg
                 or "already" in error_msg.lower()
                 or "in use" in error_msg.lower()
@@ -2272,14 +2512,13 @@ def _do_add_phone_attempt(
     except Exception as exc:
         log(f"  add-phone 页面元素枚举失败: {exc}")
 
+    # 渠道必须在国家选定之后、点发送之前定下来：国家一变，Text 是否可选会重算。
+    channel = _select_sms_channel_ui(page, log)
+    log(f"  渠道选择结果: {channel}")
+
     send_sel = _click_first(page, PHONE_SEND_SELECTORS, timeout=8)
     if send_sel:
         log(f"  已点击发送按钮: {send_sel}")
-        if "whatsapp" in str(send_sel).lower():
-            raise RuntimeError(
-                f"add_phone 点到了 WhatsApp 渠道: {send_sel}；"
-                "租用的是纯 SMS 号码，继续下去只会空等 180 秒"
-            )
     elif _submit_form_with_fallback(page, phone_input_sel):
         log("  未找到发送按钮，已使用表单 fallback 提交")
     else:
@@ -2294,6 +2533,15 @@ def _do_add_phone_attempt(
         if hasattr(phone_callback, "mark_send_failed"):
             phone_callback.mark_send_failed(error_text)
         raise RuntimeError(f"手机号提交失败: {error_text[:200]}")
+
+    # 页面侧的“我选了 Text”是我们自己的判断；服务端认不认是另一回事。
+    # 必须在 mark_send_succeeded 之前复核，避免错误渠道被标记为已发送。
+    try:
+        _verify_sms_channel_from_session(page, log)
+    except RuntimeError:
+        if hasattr(phone_callback, "mark_send_failed"):
+            phone_callback.mark_send_failed("wrong verification channel")
+        raise
 
     if hasattr(phone_callback, "mark_send_succeeded"):
         phone_callback.mark_send_succeeded()
