@@ -162,6 +162,14 @@ def _page_whatsapp_only():
     ])
 
 
+def _page_text_only():
+    """只有短信渠道时仍可继续，不应被误判为渠道缺失。"""
+    return FakePage([
+        FakeNode("Text message", {"aria-checked": "true"}),
+        FakeNode("Continue", {"type": "submit"}),
+    ])
+
+
 def _page_no_channel_choice():
     """multi_channel_allowed 为假时的形状：没有渠道选项。"""
     return FakePage([
@@ -242,6 +250,13 @@ def test_raises_when_only_whatsapp_is_offered():
     with pytest.raises(RuntimeError) as exc:
         br._select_sms_channel_ui(page, _log)
     assert "whatsapp" in str(exc.value).lower()
+
+
+def test_text_only_channel_continues():
+    """只有 Text/SMS 时可继续，不把安全的单渠道页面当成异常。"""
+    page = _page_text_only()
+    assert br._select_sms_channel_ui(page, _log) == "text"
+    assert page.clicked == []
 
 
 def test_returns_none_when_page_has_no_channel_choice():
@@ -361,9 +376,31 @@ def test_dead_selector_string_guard_is_gone():
     assert 'in str(send_sel).lower()' not in src
 
 
-def test_whatsapp_only_error_triggers_number_rotation():
-    src = _source_of(br._handle_add_phone_challenge)
-    assert "应当换号重试" in src, "只有 WhatsApp 时抛出的错要能触发换号重试"
+def test_whatsapp_only_error_triggers_number_rotation(monkeypatch):
+    """只有 WhatsApp 时，真实 UI 错误必须让 add-phone 换号重试。"""
+    error_page = _page_whatsapp_only()
+    with pytest.raises(RuntimeError) as exc:
+        br._select_sms_channel_ui(error_page, _log)
+    message = str(exc.value)
+
+    attempts = []
+
+    def _fake_attempt(_page, _phone_callback, **_kwargs):
+        attempts.append(1)
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(br, "_do_add_phone_attempt", _fake_attempt)
+    monkeypatch.setattr(br.time, "sleep", lambda *_a, **_k: None)
+
+    callback = _StubPhoneCallback()
+    with pytest.raises(RuntimeError):
+        br._handle_add_phone_challenge(
+            _NavPage([]), callback,
+            device_id="d", user_agent="ua", log=_log, max_phone_attempts=3,
+        )
+
+    assert len(attempts) == 3
+    assert callback.cleanups == 3 and callback.rearms == 3
 
 
 # ==========================================================================
