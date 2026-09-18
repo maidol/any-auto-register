@@ -234,6 +234,49 @@ def _safe_bool(value, default: bool) -> bool:
     return str(value).strip().lower() not in {"0", "false", "no", "off", "否"}
 
 
+PHONE_NUMBER_RETRY_ATTEMPTS = 3
+
+
+def _is_retryable_phone_acquisition_error(exc: Exception) -> bool:
+    """Return whether a failed number request may succeed if retried."""
+    if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
+        return True
+    if isinstance(exc, requests.HTTPError):
+        status_code = getattr(exc.response, "status_code", None)
+        return status_code in {408, 425, 429} or bool(status_code and status_code >= 500)
+
+    message = str(exc or "").strip().lower()
+    if not message:
+        return False
+    deterministic_markers = (
+        "bad_key",
+        "api_key:required",
+        "invalid api key",
+        "unauthorized",
+        "no_balance",
+        "insufficient balance",
+        "unprocessible_entity",
+        "unprocessable_entity",
+        "validation failed",
+        "invalid service",
+        "invalid country",
+        "parameter",
+    )
+    if any(marker in message for marker in deterministic_markers):
+        return False
+    retryable_markers = (
+        "no_numbers",
+        "no available numbers",
+        "temporary",
+        "timed out",
+        "timeout",
+        "connection",
+        "temporarily unavailable",
+        "service unavailable",
+    )
+    return any(marker in message for marker in retryable_markers)
+
+
 def _normalize_hero_proxy(proxy: str | None) -> str | None:
     proxy = str(proxy or "").strip()
     if not proxy or proxy.startswith("singbox://"):
@@ -1164,28 +1207,41 @@ class PhoneCallbackController:
                 except Exception as exc:
                     self.log(f"智能国家选择失败({exc})，使用默认配置")
 
+            fallback_country = self.country or self.config.get("sms_country") or self.config.get("herosms_country") or ""
+            countries = [effective_country]
+            if auto_select and effective_country != fallback_country and fallback_country:
+                countries.append(fallback_country)
             country_label = effective_country or self.config.get("sms_country") or self.config.get("sms_activate_country") or "default"
             self.log(f"已进入 add_phone，准备租用手机号: provider={self.provider_key} service={self.service} country={country_label}")
             self.log(f"正在从 {self.provider_key} 获取手机号...")
-            try:
-                self.activation = provider.get_number(service=self.service, country=effective_country)
-            except Exception as first_exc:
-                # 如果是自动选择的国家失败了，回退到默认国家重试
-                fallback_country = self.country or self.config.get("sms_country") or self.config.get("herosms_country") or ""
-                if auto_select and effective_country != fallback_country and fallback_country:
-                    self.log(f"自动选择的国家({effective_country})获取号码失败，回退到默认国家({fallback_country})...")
-                    try:
-                        self.activation = provider.get_number(service=self.service, country=fallback_country)
-                    except Exception:
+            last_exc = None
+            max_attempts = PHONE_NUMBER_RETRY_ATTEMPTS + 1
+            for attempt in range(max_attempts):
+                self.activation = None
+                request_country = countries[min(attempt, len(countries) - 1)]
+                if attempt > 0:
+                    self.log(
+                        f"获取手机号失败，准备第 {attempt}/{PHONE_NUMBER_RETRY_ATTEMPTS} 次重试: "
+                        f"country={request_country}"
+                    )
+                try:
+                    self.activation = provider.get_number(service=self.service, country=request_country)
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    if not _is_retryable_phone_acquisition_error(exc) or attempt >= PHONE_NUMBER_RETRY_ATTEMPTS:
                         if self._verify_lock_acquired:
                             _HERO_SMS_VERIFY_LOCK.release()
                             self._verify_lock_acquired = False
                         raise
-                else:
-                    if self._verify_lock_acquired:
-                        _HERO_SMS_VERIFY_LOCK.release()
-                        self._verify_lock_acquired = False
-                    raise
+                    self.log(f"获取手机号失败，将重试: {exc}")
+            if self.activation is None:
+                if self._verify_lock_acquired:
+                    _HERO_SMS_VERIFY_LOCK.release()
+                    self._verify_lock_acquired = False
+                if last_exc is not None:
+                    raise last_exc
+                raise RuntimeError("获取手机号失败")
             self.phase = "need_code"
             reused = bool((self.activation.metadata or {}).get("reused"))
             reuse_label = "复用号码" if reused else "新号码"
