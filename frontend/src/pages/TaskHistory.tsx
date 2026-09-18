@@ -3,8 +3,8 @@ import { getPlatforms } from '@/lib/app-data'
 import { apiFetch } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { getTaskStatusText, TASK_STATUS_VARIANTS } from '@/lib/tasks'
-import { RefreshCw, Activity, CheckCircle2, AlertTriangle, Clock3, ChevronDown } from 'lucide-react'
+import { getTaskStatusText, isTerminalTaskStatus, TASK_STATUS_VARIANTS } from '@/lib/tasks'
+import { RefreshCw, Activity, CheckCircle2, AlertTriangle, Clock3, ChevronDown, Ban } from 'lucide-react'
 
 function shortId(id: string) {
   if (!id) return '-'
@@ -37,6 +37,8 @@ export default function TaskHistory() {
   const [status, setStatus] = useState('')
   const [platforms, setPlatforms] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
+  const [cancellingTaskId, setCancellingTaskId] = useState<string | null>(null)
+  const [actionError, setActionError] = useState('')
 
   const load = async () => {
     setLoading(true)
@@ -61,6 +63,22 @@ export default function TaskHistory() {
     load()
   }, [platform, status])
 
+  const cancelTask = async (task: any) => {
+    if (!task.cancellable || isTerminalTaskStatus(task.status) || cancellingTaskId) return
+    if (!window.confirm('确定要终止这个任务吗？正在执行的步骤会在安全检查点停止。')) return
+
+    setActionError('')
+    setCancellingTaskId(task.id)
+    try {
+      const updated = await apiFetch(`/tasks/${task.id}/cancel`, { method: 'POST' })
+      setTasks((current) => current.map((item) => item.id === task.id ? updated : item))
+    } catch {
+      setActionError('终止任务失败，请稍后重试')
+    } finally {
+      setCancellingTaskId(null)
+    }
+  }
+
   const succeeded = tasks.filter((t) => t.status === 'succeeded').length
   const failed = tasks.filter((t) => t.status === 'failed').length
   const running = tasks.filter((t) =>
@@ -78,8 +96,11 @@ export default function TaskHistory() {
     <div className="space-y-5">
       {/* Header */}
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold text-[var(--text-primary)]">任务记录</h1>
-        <Button variant="outline" size="sm" onClick={load} disabled={loading}>
+        <div>
+          <h1 className="text-xl font-semibold text-[var(--text-primary)]">任务记录</h1>
+          {actionError && <p className="mt-1 text-xs text-red-500">{actionError}</p>}
+        </div>
+        <Button variant="outline" size="sm" onClick={load} disabled={loading || Boolean(cancellingTaskId)}>
           <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${loading ? 'animate-spin' : ''}`} />
           刷新
         </Button>
@@ -158,12 +179,13 @@ export default function TaskHistory() {
                 <th className="px-4 py-2.5 text-left text-xs font-medium text-[var(--text-muted)]">进度</th>
                 <th className="px-4 py-2.5 text-left text-xs font-medium text-[var(--text-muted)]">成功/失败</th>
                 <th className="px-4 py-2.5 text-left text-xs font-medium text-[var(--text-muted)]">错误</th>
+                <th className="px-4 py-2.5 text-left text-xs font-medium text-[var(--text-muted)]">操作</th>
               </tr>
             </thead>
             <tbody>
               {tasks.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="px-4 py-12 text-center text-sm text-[var(--text-muted)]">
+                  <td colSpan={8} className="px-4 py-12 text-center text-sm text-[var(--text-muted)]">
                     暂无任务记录
                   </td>
                 </tr>
@@ -245,6 +267,26 @@ export default function TaskHistory() {
                         >
                           {errorText}
                         </span>
+                      ) : (
+                        <span className="text-xs text-[var(--text-muted)]">-</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      {task.cancellable && !isTerminalTaskStatus(task.status) ? (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => cancelTask(task)}
+                          disabled={cancellingTaskId !== null || task.status === 'cancel_requested'}
+                          className="whitespace-nowrap text-red-500 hover:text-red-600"
+                        >
+                          <Ban className="mr-1 h-3.5 w-3.5" />
+                          {task.status === 'cancel_requested'
+                            ? '取消中'
+                            : cancellingTaskId === task.id
+                              ? '处理中...'
+                              : '终止任务'}
+                        </Button>
                       ) : (
                         <span className="text-xs text-[var(--text-muted)]">-</span>
                       )}
