@@ -1250,7 +1250,7 @@ class PhoneCallbackController:
 
         if self.phase == "need_code" and self.activation:
             self.log(f"等待短信验证码... (activation_id={self.activation.activation_id})")
-            code = provider.get_code(self.activation.activation_id, timeout=180)
+            code = provider.get_code(self.activation.activation_id, timeout=300)
             if code:
                 self.log(f"收到验证码: {code}")
                 if getattr(provider, "auto_report_success_on_code", True):

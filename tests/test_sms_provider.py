@@ -167,6 +167,32 @@ class TestCreatePhoneCallbacks:
         assert any("等待短信验证码" in item for item in logs)
         assert any("短信验证成功" in item for item in logs)
 
+    def test_phone_callback_waits_for_sms_code_up_to_300_seconds(self, monkeypatch):
+        events = []
+
+        class FakeProvider:
+            def get_number(self, *, service: str, country: str = ""):
+                return SmsActivation(activation_id="act_timeout", phone_number="+15550009999")
+
+            def get_code(self, activation_id: str, *, timeout: int = 120) -> str:
+                events.append(("get_code", activation_id, timeout))
+                return "123456"
+
+            def report_success(self, activation_id: str) -> bool:
+                return True
+
+        monkeypatch.setattr("core.base_sms.create_sms_provider", lambda provider_key, config: FakeProvider())
+        callback, cleanup = create_phone_callbacks(
+            "sms_activate",
+            {"sms_activate_api_key": "test"},
+            service="chatgpt",
+        )
+
+        assert callback() == "+15550009999"
+        assert callback() == "123456"
+        assert events == [("get_code", "act_timeout", 300)]
+        cleanup()
+
     def test_deferred_success_provider_reports_on_cleanup_for_legacy_callers(self, monkeypatch):
         events = []
 
