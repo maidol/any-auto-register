@@ -1,7 +1,13 @@
 """Task command API tests."""
 from __future__ import annotations
 
-from application.tasks import create_task
+from application.tasks import (
+    TASK_STATUS_CANCEL_REQUESTED,
+    TASK_STATUS_RUNNING,
+    TASK_STATUS_SUCCEEDED,
+    _mutate_task,
+    create_task,
+)
 
 
 def test_cancel_pending_task(client):
@@ -16,6 +22,65 @@ def test_cancel_pending_task(client):
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "cancelled"
+    assert data["cancellable"] is False
+
+
+def test_cancel_running_task_requests_cancellation(client):
+    task = create_task(
+        task_type="register",
+        platform="chatgpt",
+        payload={"platform": "chatgpt", "count": 1},
+    )
+    _mutate_task(task["id"], lambda model: setattr(model, "status", TASK_STATUS_RUNNING))
+
+    response = client.post(f"/api/tasks/{task['id']}/cancel")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == TASK_STATUS_CANCEL_REQUESTED
+    assert data["cancellable"] is True
+    assert data["finished_at"] is None
+
+
+def test_cancel_running_task_does_not_make_it_terminal(client):
+    task = create_task(
+        task_type="register",
+        platform="chatgpt",
+        payload={"platform": "chatgpt", "count": 1},
+    )
+    _mutate_task(task["id"], lambda model: setattr(model, "status", TASK_STATUS_RUNNING))
+
+    response = client.post(f"/api/tasks/{task['id']}/cancel")
+
+    assert response.status_code == 200
+    assert response.json()["status"] not in {
+        "cancelled",
+        "succeeded",
+        "failed",
+        "interrupted",
+    }
+
+
+def test_cancel_succeeded_task_is_noop(client):
+    task = create_task(
+        task_type="register",
+        platform="chatgpt",
+        payload={"platform": "chatgpt", "count": 1},
+    )
+    _mutate_task(
+        task["id"],
+        lambda model: (
+            setattr(model, "status", TASK_STATUS_SUCCEEDED),
+            setattr(model, "error", "already finished"),
+        ),
+    )
+
+    response = client.post(f"/api/tasks/{task['id']}/cancel")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == TASK_STATUS_SUCCEEDED
+    assert data["error"] == "already finished"
     assert data["cancellable"] is False
 
 
