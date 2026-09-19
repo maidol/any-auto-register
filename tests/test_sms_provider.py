@@ -413,6 +413,51 @@ class TestCreatePhoneCallbacks:
         assert provider.calls == ["99", "52", "52", "52"]
         cleanup()
 
+    def test_country_rotation_selects_another_provider_country(self, monkeypatch):
+        events = []
+
+        class FakeProvider:
+            def get_country_candidates(self, *, service: str, exclude=()):
+                events.append(("candidates", service, tuple(exclude)))
+                return [country for country in ["52", "66", "7"] if country not in set(exclude)]
+
+            def get_number(self, *, service: str, country: str = ""):
+                events.append(("get_number", service, country))
+                return SmsActivation(
+                    activation_id=f"act_{country}",
+                    phone_number=f"+{country}123456789",
+                    country=country,
+                )
+
+            def cancel(self, activation_id: str) -> bool:
+                events.append(("cancel", activation_id))
+                return True
+
+        provider = FakeProvider()
+        monkeypatch.setattr("core.base_sms.create_sms_provider", lambda provider_key, config: provider)
+        callback, cleanup = create_phone_callbacks(
+            "herosms",
+            {"herosms_api_key": "test"},
+            service="chatgpt",
+            country="187",
+        )
+
+        assert callback() == "+187123456789"
+        cleanup()
+        assert callback.rotate_country() is True
+        callback.rearm()
+        assert callback() == "+52123456789"
+        cleanup()
+        assert callback.rotate_country() is True
+        callback.rearm()
+        assert callback() == "+66123456789"
+        assert [event for event in events if event[0] == "get_number"] == [
+            ("get_number", "chatgpt", "187"),
+            ("get_number", "chatgpt", "52"),
+            ("get_number", "chatgpt", "66"),
+        ]
+        cleanup()
+
     def test_herosms_number_fetch_failure_releases_verify_lock(self, monkeypatch):
         class FakeProvider:
             def get_number(self, *, service: str, country: str = ""):

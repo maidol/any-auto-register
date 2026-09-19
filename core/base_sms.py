@@ -43,6 +43,10 @@ class BaseSmsProvider(ABC):
         """Rent a phone number for the given service."""
         ...
 
+    def get_country_candidates(self, *, service: str, exclude=()) -> list[str]:
+        """Return optional country candidates for a failed browser attempt."""
+        return []
+
     @abstractmethod
     def get_code(self, activation_id: str, *, timeout: int = 120) -> str:
         """Wait for and return the SMS verification code."""
@@ -587,6 +591,21 @@ class HeroSmsProvider(BaseSmsProvider):
                 if price is not None:
                     rows.append({"country": str(country_id), "name": str(name), "price": price, "count": count})
         return rows
+
+    def get_country_candidates(self, *, service: str, exclude=()) -> list[str]:
+        excluded = {str(item or "").strip() for item in (exclude or ())}
+        try:
+            rows = self.get_top_countries(service=service)
+        except Exception as exc:
+            logger.warning("get_country_candidates 查询失败: %s", exc)
+            return []
+        return [
+            str(row.get("country") or "").strip()
+            for row in rows
+            if str(row.get("country") or "").strip()
+            and str(row.get("country") or "").strip() not in excluded
+            and int(row.get("count") or 0) > 0
+        ]
 
     def get_best_country(self, service: str | None = None, *, min_stock: int = 20, max_price: float = 0) -> str | None:
         """自动选择最优国家：价格最低且库存充足。
@@ -1188,6 +1207,9 @@ class PhoneCallbackController:
         self.completed = False
         self._verify_lock_acquired = False
         self.awaiting_external_success = False
+        self._failed_countries: set[str] = set()
+        self._last_request_country = ""
+        self._country_rotation_active = False
 
     def _provider(self) -> BaseSmsProvider:
         if self.provider is None:
@@ -1200,6 +1222,39 @@ class PhoneCallbackController:
         self.completed = False
         self.awaiting_external_success = False
         self.phase = "need_number"
+
+    def rotate_country(self) -> bool:
+        """Advance to the next provider country after a failed browser attempt."""
+        current = str(self._last_request_country or self.country or "").strip()
+        if current:
+            self._failed_countries.add(current)
+        provider = self._provider()
+        candidates = []
+        fallback_country = str(
+            self.config.get("sms_country")
+            or self.config.get("herosms_country")
+            or self.config.get("smsbower_country")
+            or ""
+        ).strip()
+        if fallback_country and fallback_country not in self._failed_countries:
+            candidates.append(fallback_country)
+        get_candidates = getattr(provider, "get_country_candidates", None)
+        if callable(get_candidates):
+            try:
+                candidates.extend(
+                    get_candidates(service=self.service, exclude=self._failed_countries)
+                    or []
+                )
+            except Exception as exc:
+                self.log(f"国家轮换查询失败({exc})")
+        for country in candidates:
+            country = str(country or "").strip()
+            if country and country not in self._failed_countries:
+                self.country = country
+                self._country_rotation_active = True
+                self.log(f"手机号验证失败，切换到国家: {country}")
+                return True
+        return False
 
     def __call__(self) -> str:
         if self.phase == "done":
@@ -1215,7 +1270,7 @@ class PhoneCallbackController:
             # 智能国家选择：如果启用了 auto_select_country，自动查询最优国家
             effective_country = self.country
             auto_select = _safe_bool(self.config.get("herosms_auto_country") or self.config.get("smsbower_auto_country"), False)
-            if auto_select and isinstance(provider, HeroSmsProvider):
+            if auto_select and not self._country_rotation_active and isinstance(provider, HeroSmsProvider):
                 self.log("正在查询最优国家（价格最低 + 库存充足）...")
                 try:
                     min_stock = _safe_int(self.config.get("herosms_auto_country_min_stock") or self.config.get("smsbower_auto_country_min_stock"), 20)
@@ -1251,6 +1306,7 @@ class PhoneCallbackController:
                         f"country={request_country}"
                     )
                 try:
+                    self._last_request_country = str(request_country or "")
                     self.activation = provider.get_number(service=self.service, country=request_country)
                     break
                 except Exception as exc:

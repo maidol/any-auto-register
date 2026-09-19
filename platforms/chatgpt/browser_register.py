@@ -2358,19 +2358,39 @@ def _handle_add_phone_challenge(
             last_error = exc
             error_msg = str(exc)
             # 验证码超时或号码已被使用时换号重试，其他错误直接抛出
+            error_lower = error_msg.lower()
+            whatsapp_send_failure = (
+                "couldn't send a text message" in error_lower
+                and "whatsapp" in error_lower
+            )
+            should_rotate_country = (
+                "应当换号重试" in error_msg
+                or whatsapp_send_failure
+            )
             should_retry = (
                 "未获取到短信验证码" in error_msg
-                or "应当换号重试" in error_msg
+                or should_rotate_country
                 or "phone_number_in_use" in error_msg
-                or "already" in error_msg.lower()
-                or "in use" in error_msg.lower()
+                or "already" in error_lower
+                or "in use" in error_lower
             )
             if not should_retry:
                 raise
-            log(f"⚠️ 验证码超时未收到，准备换号重试...")
+            log(f"⚠️ 手机号验证失败，准备换号重试...")
             # 取消当前号码
             if hasattr(phone_callback, "cleanup"):
                 phone_callback.cleanup()
+            # WhatsApp/短信渠道失败后，下一次必须尝试不同国家；验证码超时和
+            # 号码占用仍沿用原来的同国换号逻辑。
+            if (
+                should_rotate_country
+                and phone_attempt + 1 < max_phone_attempts
+                and hasattr(phone_callback, "rotate_country")
+            ):
+                if phone_callback.rotate_country():
+                    log("手机号验证失败，已切换国家后重新获取号码")
+                else:
+                    raise RuntimeError("手机号验证失败：没有可用的其他国家号码，停止重试")
             # 重置 phone_callback 状态为 need_number
             if hasattr(phone_callback, "rearm"):
                 phone_callback.rearm()

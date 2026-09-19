@@ -508,6 +508,58 @@ class _StubPhoneCallback:
         self.rearms += 1
 
 
+class _CountryRotatingPhoneCallback(_StubPhoneCallback):
+    def __init__(self):
+        super().__init__()
+        self.numbers = [
+            "+8613800000000",
+            "+66959075673",
+            "+74951234567",
+        ]
+        self.rotations = 0
+
+    def __call__(self):
+        return self.numbers.pop(0)
+
+    def rotate_country(self):
+        self.rotations += 1
+        return True
+
+
+def test_whatsapp_failure_rotates_country_before_retry(monkeypatch):
+    page = FakePage([], cookies=_session_cookie(
+        {"phone_verification_channel": "whatsapp"}
+    ))
+    message = (
+        "手机号提交失败: We couldn't send a text message to this phone number, "
+        "so we switched to WhatsApp. Continue to send a verification code on WhatsApp."
+    )
+
+    attempts = []
+    callback = _CountryRotatingPhoneCallback()
+
+    def _fake_attempt(_page, phone_callback, **_kwargs):
+        attempts.append(br._parse_phone_country_and_local(phone_callback()))
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(br, "_do_add_phone_attempt", _fake_attempt)
+    monkeypatch.setattr(br.time, "sleep", lambda *_a, **_k: None)
+
+    with pytest.raises(RuntimeError):
+        br._handle_add_phone_challenge(
+            _NavPage([]), callback,
+            device_id="d", user_agent="ua", log=_log, max_phone_attempts=3,
+        )
+
+    assert attempts == [
+        ("86", "13800000000", "China"),
+        ("66", "959075673", "Thailand"),
+        ("7", "4951234567", "Russia"),
+    ]
+    assert callback.rotations == 2
+    assert callback.cleanups == 3 and callback.rearms == 3
+
+
 def test_server_side_whatsapp_verdict_triggers_number_rotation(monkeypatch):
     page = FakePage([], cookies=_session_cookie(
         {"phone_verification_channel": "whatsapp"}
