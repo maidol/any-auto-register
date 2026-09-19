@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import pytest
 from core.base_sms import (
+    HeroSmsCodeTimeoutError,
     HeroSmsProvider,
     SmsActivation,
     SmsActivateProvider,
@@ -168,7 +169,33 @@ class TestCreatePhoneCallbacks:
         assert any("等待短信验证码" in item for item in logs)
         assert any("短信验证成功" in item for item in logs)
 
-    def test_phone_callback_waits_for_sms_code_up_to_300_seconds(self, monkeypatch):
+    def test_phone_callback_uses_200_seconds_only_for_herosms(self, monkeypatch):
+        events = []
+
+        class FakeProvider:
+            def get_number(self, *, service: str, country: str = ""):
+                return SmsActivation(activation_id="act_timeout", phone_number="+15550009999")
+
+            def get_code(self, activation_id: str, *, timeout: int = 120) -> str:
+                events.append(("get_code", activation_id, timeout))
+                return "123456"
+
+            def report_success(self, activation_id: str) -> bool:
+                return True
+
+        monkeypatch.setattr("core.base_sms.create_sms_provider", lambda provider_key, config: FakeProvider())
+        callback, cleanup = create_phone_callbacks(
+            "herosms",
+            {"herosms_api_key": "test"},
+            service="chatgpt",
+        )
+
+        assert callback() == "+15550009999"
+        assert callback() == "123456"
+        assert events == [("get_code", "act_timeout", 200)]
+        cleanup()
+
+    def test_phone_callback_keeps_300_seconds_for_non_herosms(self, monkeypatch):
         events = []
 
         class FakeProvider:
@@ -193,6 +220,28 @@ class TestCreatePhoneCallbacks:
         assert callback() == "123456"
         assert events == [("get_code", "act_timeout", 300)]
         cleanup()
+
+    def test_herosms_timeout_raises_and_cancels_without_resend(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(sms_module, "hero_sms_cache_file", lambda: tmp_path / ".cache.json")
+        monkeypatch.setattr(sms_module, "_HERO_SMS_CACHE", None)
+        provider = HeroSmsProvider("hero123")
+        events = []
+        clock = iter([0, 0, 1, 2, 3])
+        monkeypatch.setattr(sms_module.time, "time", lambda: next(clock))
+        monkeypatch.setattr(sms_module.time, "sleep", lambda *_args: None)
+        monkeypatch.setattr(provider, "get_status_v2", lambda _id: {"status": "wait_code"})
+        monkeypatch.setattr(provider, "get_status", lambda _id: {"status": "wait_code"})
+        monkeypatch.setattr(provider, "get_active_activations", lambda: [])
+        monkeypatch.setattr(provider, "request_resend_sms", lambda _id: events.append("hero_resend"))
+        provider.set_resend_callback(lambda: events.append("openai_resend"))
+        monkeypatch.setattr(provider, "cancel_activation", lambda activation_id: events.append(("cancel", activation_id)) or True)
+
+        with pytest.raises(HeroSmsCodeTimeoutError, match="act_timeout"):
+            provider.get_code("act_timeout", timeout=2)
+
+        assert events == [("cancel", "act_timeout")]
+        assert provider.last_code_result is None
+        assert sms_module._HERO_SMS_CACHE is None
 
     def test_deferred_success_provider_reports_on_cleanup_for_legacy_callers(self, monkeypatch):
         events = []

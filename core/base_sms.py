@@ -33,6 +33,16 @@ class PhoneNumberAcquisitionError(RuntimeError):
         self.retryable = retryable
 
 
+class HeroSmsCodeTimeoutError(RuntimeError):
+    """HeroSMS waited for the code budget and released the activation."""
+
+    retryable = False
+
+    def __init__(self, activation_id: str):
+        self.activation_id = str(activation_id)
+        super().__init__(f"HeroSMS 短信验证码等待超时: activation_id={self.activation_id}")
+
+
 class BaseSmsProvider(ABC):
     """Base class for SMS verification code providers."""
 
@@ -214,6 +224,7 @@ HERO_SMS_DEFAULT_SERVICE = "dr"
 # 才会被读到，默认关闭，所以这个默认值必须自己是对的。
 HERO_SMS_DEFAULT_COUNTRY = "52"
 HERO_SMS_PHONE_LIFETIME = 20 * 60
+HERO_SMS_CODE_TIMEOUT = 200
 _HERO_SMS_CACHE_LOCK = threading.Lock()
 _HERO_SMS_VERIFY_LOCK = threading.RLock()
 _HERO_SMS_CACHE: dict | None = None
@@ -943,7 +954,8 @@ class HeroSmsProvider(BaseSmsProvider):
             return False
 
     def wait_for_code(self, activation_id: str, *, timeout: int = 180, poll_interval: int = 3) -> dict | None:
-        deadline = time.time() + timeout
+        strict_hero = type(self) is HeroSmsProvider
+        deadline = time.time() + (min(timeout, HERO_SMS_CODE_TIMEOUT) if strict_hero else timeout)
         start = time.time()
         last_hero_resend = start
         openai_resent = False
@@ -995,37 +1007,42 @@ class HeroSmsProvider(BaseSmsProvider):
                     else:
                         logger.debug("HeroSMS status check failed via %s: %s", source, exc)
 
-            elapsed = time.time() - start
-            if not openai_resent and elapsed >= 90 and self.openai_resend_callback:
-                try:
-                    self.openai_resend_callback()
-                except Exception as exc:
-                    logger.warning("OpenAI phone resend callback failed: %s", exc)
-                self.request_resend_sms(activation_id)
-                last_hero_resend = time.time()
-                openai_resent = True
-            elif time.time() - last_hero_resend >= 30:
-                self.request_resend_sms(activation_id)
-                last_hero_resend = time.time()
-
+            if not strict_hero:
+                elapsed = time.time() - start
+                if not openai_resent and elapsed >= 90 and self.openai_resend_callback:
+                    try:
+                        self.openai_resend_callback()
+                    except Exception as exc:
+                        logger.warning("OpenAI phone resend callback failed: %s", exc)
+                    self.request_resend_sms(activation_id)
+                    last_hero_resend = time.time()
+                    openai_resent = True
+                elif time.time() - last_hero_resend >= 30:
+                    self.request_resend_sms(activation_id)
+                    last_hero_resend = time.time()
             time.sleep(poll_interval)
         return None
 
     def get_code(self, activation_id: str, *, timeout: int = 120) -> str:
-        wait_timeout = timeout
-        with _HERO_SMS_CACHE_LOCK:
-            cache = _HERO_SMS_CACHE or {}
-            if cache and str(cache.get("activation_id")) == str(activation_id):
-                remaining = int(HERO_SMS_PHONE_LIFETIME - (time.time() - float(cache.get("acquired_at") or 0)))
-                wait_timeout = max(timeout, remaining, 60)
+        wait_timeout = min(timeout, HERO_SMS_CODE_TIMEOUT) if type(self) is HeroSmsProvider else timeout
         candidate = self.wait_for_code(activation_id, timeout=wait_timeout)
+        if candidate is None:
+            self.last_code_result = None
+            try:
+                self.cancel(activation_id)
+            except Exception as exc:
+                logger.warning("HeroSMS timeout cancellation failed: %s", exc)
+            raise HeroSmsCodeTimeoutError(activation_id) from None
         self.last_code_result = candidate
-        return str((candidate or {}).get("code") or "")
+        return str(candidate.get("code") or "")
 
     def cancel(self, activation_id: str) -> bool:
         try:
             return self.cancel_activation(activation_id)
         finally:
+            self.current_activation = None
+            self.last_code_result = None
+            self.openai_resend_callback = None
             with _HERO_SMS_CACHE_LOCK:
                 cache = _HERO_SMS_CACHE
                 if cache and str(cache.get("activation_id")) == str(activation_id):
@@ -1370,7 +1387,17 @@ class PhoneCallbackController:
 
         if self.phase == "need_code" and self.activation:
             self.log(f"等待短信验证码... (activation_id={self.activation.activation_id})")
-            code = provider.get_code(self.activation.activation_id, timeout=300)
+            code_timeout = 200 if self.provider_key in ("herosms", "herosms_api") else 300
+            try:
+                code = provider.get_code(self.activation.activation_id, timeout=code_timeout)
+            except HeroSmsCodeTimeoutError:
+                self.activation = None
+                self.awaiting_external_success = False
+                self.phase = "timed_out"
+                if self._verify_lock_acquired:
+                    _HERO_SMS_VERIFY_LOCK.release()
+                    self._verify_lock_acquired = False
+                raise
             if code:
                 self.log(f"收到验证码: {code}")
                 if getattr(provider, "auto_report_success_on_code", True):

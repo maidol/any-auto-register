@@ -11,6 +11,8 @@ from urllib.parse import urljoin, urlparse
 
 from camoufox.sync_api import Camoufox
 
+from core.base_sms import HeroSmsCodeTimeoutError
+
 from .constants import (
     OPENAI_AUTH,
     CHATGPT_APP,
@@ -2388,6 +2390,9 @@ def _handle_add_phone_challenge(
                 log=log, resume_url=resume_url,
             )
             return result
+        except HeroSmsCodeTimeoutError:
+            log("⚠️ HeroSMS 等待短信验证码超时，号码已取消，终止当前注册流程")
+            raise
         except RuntimeError as exc:
             last_error = exc
             error_msg = str(exc)

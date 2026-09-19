@@ -541,6 +541,25 @@ class _CountryTracePhoneCallback:
         self.events.append(("rearm", self.country))
 
 
+def test_herosms_timeout_terminates_without_phone_retry(monkeypatch):
+    callback = _CountryTracePhoneCallback()
+    attempts = []
+
+    def _fake_attempt(_page, _phone_callback, **_kwargs):
+        attempts.append(1)
+        raise br.HeroSmsCodeTimeoutError("act_timeout")
+
+    monkeypatch.setattr(br, "_do_add_phone_attempt", _fake_attempt)
+    with pytest.raises(br.HeroSmsCodeTimeoutError, match="act_timeout"):
+        br._handle_add_phone_challenge(
+            _NavPage([]), callback,
+            device_id="d", user_agent="ua", log=_log, max_phone_attempts=3,
+        )
+
+    assert len(attempts) == 1
+    assert callback.events == []
+
+
 def test_whatsapp_failure_rotates_country_before_retry(monkeypatch):
     page = FakePage([], cookies=_session_cookie(
         {"phone_verification_channel": "whatsapp"}
