@@ -1152,14 +1152,14 @@ def _pick_best_about_you_input(entries: list[dict], field: str, exclude_visible_
                 score += 10
             if any(token in hints for token in (" name ", "name", "autocomplete=name", "nombre", "nom", "nome")):
                 score += 3
-            if any(token in hints for token in ("age", "年龄", "edad", "âge", "alter", "idade", "birthday", "birth", "date of birth", "出生", "生日")):
+            if any(token in hints for token in ("age", "年龄", "年齢", "edad", "âge", "alter", "idade", "birthday", "birth", "date of birth", "出生", "生日")):
                 score -= 8
         elif field == "age":
-            if any(token in hints for token in ("age", "年龄", "how old", "edad", "âge", "alter", "idade", "나이")):
+            if any(token in hints for token in ("age", "年龄", "年齢", "how old", "edad", "âge", "alter", "idade", "나이")):
                 score += 10
             if any(token in hints for token in ("full name", "fullname", "全名", "姓名", "nombre completo", "nom complet")):
                 score -= 10
-            if "name" in hints and "age" not in hints and "年龄" not in hints and "edad" not in hints:
+            if "name" in hints and not any(token in hints for token in ("age", "年龄", "年齢", "edad")):
                 score -= 6
             if any(token in hints for token in ("birthday", "birth", "date of birth", "出生", "生日", "fecha de nacimiento", "nascimento")):
                 score -= 3
@@ -1187,6 +1187,40 @@ def _pick_best_about_you_input(entries: list[dict], field: str, exclude_visible_
         if len(ordered) == 2:
             return ordered[1]
     return None
+
+
+def _detect_about_you_mode(
+    mode_probe: dict,
+    *,
+    has_age_field: bool,
+    has_birthday_field: bool,
+    has_birthday_select: bool,
+) -> str:
+    if has_birthday_select:
+        return "birthday_select"
+    has_age_label = bool(mode_probe.get("hasAge"))
+    has_birthday_label = bool(mode_probe.get("hasBirthday"))
+    if (has_age_label and not has_birthday_label) or (
+        has_age_field and not has_birthday_field
+    ):
+        return "age"
+    return "birthday"
+
+
+def _about_you_fill_complete(about_mode: str, fill_result: dict) -> bool:
+    if not fill_result.get("name"):
+        return False
+    if about_mode == "age":
+        return bool(fill_result.get("age"))
+    return bool(
+        fill_result.get("birthdate")
+        or fill_result.get("age")
+        or (
+            fill_result.get("month")
+            and fill_result.get("day")
+            and fill_result.get("year")
+        )
+    )
 
 
 def _derive_registration_state_from_page(page) -> dict:
@@ -3644,12 +3678,13 @@ def _submit_about_you_via_page(page, log) -> dict:
 
     age_candidates = [
         page.get_by_label(re.compile(r"age", re.IGNORECASE)),
-        page.get_by_label(re.compile(r"年龄", re.IGNORECASE)),
+        page.get_by_label(re.compile(r"年龄|年齢", re.IGNORECASE)),
         page.get_by_role("textbox", name=re.compile(r"age", re.IGNORECASE)),
-        page.get_by_role("textbox", name=re.compile(r"年龄", re.IGNORECASE)),
+        page.get_by_role("textbox", name=re.compile(r"年龄|年齢", re.IGNORECASE)),
         page.locator("input[name*='age' i]"),
         page.locator("input[id*='age' i]"),
         page.locator("input[placeholder*='Age' i]"),
+        page.locator("input[placeholder*='年齢']"),
         page.locator("input[placeholder*='年龄']"),
         page.locator(
             "xpath=//*[contains(translate(normalize-space(string(.)),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'age')]/following::input[1]"
@@ -3680,7 +3715,7 @@ def _submit_about_you_via_page(page, log) -> dict:
                 .map((n) => String(n.textContent || '').trim().toLowerCase())
                 .filter(Boolean);
               const allText = labels.concat(placeholders).concat(headings);
-              const hasAge = allText.some((t) => t === 'age' || t === 'edad' || t === 'âge' || t === 'alter' || t === 'idade' || t.includes('how old') || t.includes('年龄') || t.includes('나이'));
+              const hasAge = allText.some((t) => t === 'age' || t === 'edad' || t === 'âge' || t === 'alter' || t === 'idade' || t.includes('how old') || t.includes('年龄') || t.includes('年齢') || t.includes('나이'));
               const hasBirthday = allText.some((t) =>
                 t.includes('birthday') || t.includes('date of birth') || t.includes('birth') || t.includes('生日') || t.includes('出生') || t.includes('fecha de nacimiento') || t.includes('nascimento') || t.includes('geburtstag') || t.includes('naissance')
               );
@@ -3700,12 +3735,12 @@ def _submit_about_you_via_page(page, log) -> dict:
         has_birthday_select = page.locator("select:visible").count() >= 2
     except Exception:
         has_birthday_select = False
-    if has_birthday_select:
-        about_mode = "birthday_select"
-    elif (has_age_label and not has_birthday_label) or (has_age_field and not has_birthday_field):
-        about_mode = "age"
-    else:
-        about_mode = "birthday"
+    about_mode = _detect_about_you_mode(
+        mode_probe,
+        has_age_field=has_age_field,
+        has_birthday_field=has_birthday_field,
+        has_birthday_select=has_birthday_select,
+    )
     log(f"about_you 页面模式: {about_mode} labels={mode_probe.get('labels', [])[:4]}")
     direct_name_selector = _resolve_visible_input_selector(
         [
@@ -3885,13 +3920,11 @@ def _submit_about_you_via_page(page, log) -> dict:
                 fill_result["birthdate"] = True
 
     log(f"about_you 填写结果: {fill_result}")
-    if not fill_result.get("name"):
-        raise RuntimeError("about_you 未成功填写 Full name")
-    if not (
-        fill_result.get("birthdate")
-        or fill_result.get("age")
-        or (fill_result.get("month") and fill_result.get("day") and fill_result.get("year"))
-    ):
+    if not _about_you_fill_complete(about_mode, fill_result):
+        if not fill_result.get("name"):
+            raise RuntimeError("about_you 未成功填写 Full name")
+        if about_mode == "age":
+            raise RuntimeError("about_you 未成功填写 Age")
         raise RuntimeError("about_you 未成功填写 Birthday/Age")
     _browser_pause(page)
 
