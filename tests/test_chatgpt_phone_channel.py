@@ -625,12 +625,16 @@ def test_whatsapp_failure_stops_when_no_alternate_country(monkeypatch):
 
     monkeypatch.setattr(br, "_do_add_phone_attempt", _fake_attempt)
 
-    with pytest.raises(RuntimeError, match="没有可用的其他国家号码"):
+    with pytest.raises(RuntimeError, match="没有可用的其他国家号码") as exc_info:
         br._handle_add_phone_challenge(
             _NavPage([]), callback,
             device_id="d", user_agent="ua", log=_log, max_phone_attempts=3,
         )
 
+    cause = exc_info.value.__cause__
+    assert cause is not None and "whatsapp" in str(cause).lower(), (
+        "终止时必须带上原始报错，否则运维只看到结论、看不到是什么把它逼到终止"
+    )
     assert len(attempts) == 1
     assert callback.events == [("number", "86"), ("cleanup", "86"), ("rotate", "86", None)]
 

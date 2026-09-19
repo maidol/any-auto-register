@@ -619,6 +619,124 @@ class TestCreatePhoneCallbacks:
         assert callback._country_rotation_active is False
         cleanup()
 
+    def test_base_provider_candidates_default_is_undecided_not_empty(self):
+        class MinimalProvider(sms_module.BaseSmsProvider):
+            def get_number(self, *, service: str, country: str = ""):
+                return SmsActivation(activation_id="a", phone_number="+1")
+
+            def get_code(self, activation_id: str, *, timeout: int = 120) -> str:
+                return "1"
+
+            def cancel(self, activation_id: str) -> bool:
+                return True
+
+        assert MinimalProvider().get_country_candidates(service="chatgpt") is None, (
+            "没有库存查询能力的 provider 返回 [] 会被读成『查过了，没有别的国家』"
+        )
+
+    def test_rotation_is_undecided_when_provider_has_no_inventory_lookup(self, monkeypatch):
+        class NoLookupProvider(sms_module.BaseSmsProvider):
+            def get_number(self, *, service: str, country: str = ""):
+                return SmsActivation(activation_id="a", phone_number="+52123456789")
+
+            def get_code(self, activation_id: str, *, timeout: int = 120) -> str:
+                return "1"
+
+            def cancel(self, activation_id: str) -> bool:
+                return True
+
+        monkeypatch.setattr("core.base_sms.create_sms_provider", lambda k, c: NoLookupProvider())
+        callback, cleanup = create_phone_callbacks(
+            "sms_activate", {"sms_activate_api_key": "t"},
+            service="chatgpt", country="52",
+        )
+        assert callback.rotate_country() is None, (
+            "sms_activate / smsbower 没有库存查询，不能把『我不知道』说成『没有别的国家』"
+        )
+        cleanup()
+
+    def test_herosms_top_countries_strict_rejects_http200_error_payload(self, monkeypatch):
+        provider = HeroSmsProvider("hero123")
+
+        class Response:
+            def json(self):
+                return {"status": 0, "message": "No access", "data": []}
+
+        monkeypatch.setattr(provider, "_request", lambda params, **kwargs: Response())
+        with pytest.raises(RuntimeError):
+            provider.get_top_countries(service="chatgpt", strict=True)
+
+    def test_herosms_top_countries_strict_accepts_genuinely_sold_out(self, monkeypatch):
+        provider = HeroSmsProvider("hero123")
+
+        class Response:
+            def json(self):
+                return {"52": {"chatgpt": {"cost": 0.5, "count": 0}}}
+
+        monkeypatch.setattr(provider, "_request", lambda params, **kwargs: Response())
+        assert provider.get_top_countries(service="chatgpt", strict=True) == [], (
+            "报文里出现了这个服务、只是库存为 0，这是『真的没货』，不能抛"
+        )
+
+    def test_rotation_end_to_end_when_herosms_request_fails(self, monkeypatch):
+        provider = HeroSmsProvider("hero123")
+
+        def fail_request(params, **kwargs):
+            raise ConnectionError("inventory down")
+
+        monkeypatch.setattr(provider, "_request", fail_request)
+        monkeypatch.setattr("core.base_sms.create_sms_provider", lambda k, c: provider)
+        callback, cleanup = create_phone_callbacks(
+            "herosms", {"herosms_api_key": "t"}, service="chatgpt", country="52",
+        )
+        assert callback.rotate_country() is None, (
+            "这条不桩 get_top_countries、也不桩 get_country_candidates："
+            "它钉的是两者之间的接线（strict=True）"
+        )
+        assert callback._failed_countries == set()
+        cleanup()
+
+    def test_rotation_end_to_end_when_herosms_returns_error_payload(self, monkeypatch):
+        provider = HeroSmsProvider("hero123")
+
+        class Response:
+            def json(self):
+                return {"status": 0, "message": "No access", "data": []}
+
+        monkeypatch.setattr(provider, "_request", lambda params, **kwargs: Response())
+        monkeypatch.setattr("core.base_sms.create_sms_provider", lambda k, c: provider)
+        callback, cleanup = create_phone_callbacks(
+            "herosms", {"herosms_api_key": "t"}, service="chatgpt", country="52",
+        )
+        assert callback.rotate_country() is None, (
+            "HTTP 200 + JSON 错误体也是『查不到』，不是『没有别的国家』"
+        )
+        cleanup()
+
+    def test_rotation_logs_a_reason_before_returning_false(self, monkeypatch):
+        logs = []
+
+        class FakeProvider:
+            def get_number(self, *, service: str, country: str = ""):
+                return SmsActivation(activation_id="a", phone_number="+52123456789")
+
+            def get_country_candidates(self, *, service: str, exclude=()):
+                return []
+
+            def cancel(self, activation_id: str) -> bool:
+                return True
+
+        monkeypatch.setattr("core.base_sms.create_sms_provider", lambda k, c: FakeProvider())
+        callback, cleanup = create_phone_callbacks(
+            "herosms", {"herosms_api_key": "t"},
+            service="chatgpt", country="52", log_fn=logs.append,
+        )
+        assert callback.rotate_country() is False
+        assert any("国家轮换" in m for m in logs), (
+            f"返回 False 会让整轮注册终止，终止前必须留下一条日志，实际 logs={logs}"
+        )
+        cleanup()
+
     def test_herosms_number_fetch_failure_releases_verify_lock(self, monkeypatch):
         class FakeProvider:
             def get_number(self, *, service: str, country: str = ""):

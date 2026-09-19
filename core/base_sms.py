@@ -44,8 +44,12 @@ class BaseSmsProvider(ABC):
         ...
 
     def get_country_candidates(self, *, service: str, exclude=()) -> list[str] | None:
-        """Return country candidates, or None when inventory lookup failed."""
-        return []
+        """Return country candidates, or None when inventory lookup failed.
+
+        默认实现没有库存查询能力，所以它给不出结论：返回 None（判断不了），
+        而不是 []（查过了，确实没有）。调用方看到 None 不能终止重试。
+        """
+        return None
 
     @abstractmethod
     def get_code(self, activation_id: str, *, timeout: int = 120) -> str:
@@ -518,12 +522,14 @@ class HeroSmsProvider(BaseSmsProvider):
         try:
             prices = self.get_prices(service=service_code)
             rows = []
+            matched = 0
             for country_id, services in prices.items():
                 if not isinstance(services, dict):
                     continue
                 svc_data = services.get(service_code)
                 if not isinstance(svc_data, dict):
                     continue
+                matched += 1
                 price = svc_data.get("cost") or svc_data.get("price")
                 count = svc_data.get("count") or svc_data.get("qty") or svc_data.get("available")
                 try:
@@ -537,11 +543,15 @@ class HeroSmsProvider(BaseSmsProvider):
                 if price is not None and count > 0:
                     rows.append({"country": str(country_id), "price": price, "count": count})
             rows.sort(key=lambda r: (r.get("price") or 999, -(r.get("count") or 0)))
-            return rows
         except Exception as exc:
             if strict:
                 raise RuntimeError("HeroSMS 国家库存查询失败") from exc
             return []
+        if strict and not matched:
+            raise RuntimeError(
+                f"HeroSMS 国家库存查询没有返回 {service_code} 的任何行，无法判断可用国家"
+            )
+        return rows
 
     def _parse_top_countries_response(self, data) -> list[dict]:
         """解析 getTopCountriesByServiceRank 响应。"""
@@ -1239,6 +1249,7 @@ class PhoneCallbackController:
         ).strip()
         if fallback_country and fallback_country not in self._failed_countries:
             candidates.append(fallback_country)
+        lookup_failed = False
         get_candidates = getattr(provider, "get_country_candidates", None)
         if callable(get_candidates):
             try:
@@ -1248,26 +1259,29 @@ class PhoneCallbackController:
                 )
             except Exception as exc:
                 self.log(f"国家轮换查询失败({exc})")
-                if fallback_country and fallback_country not in self._failed_countries and fallback_country != current:
-                    self.country = fallback_country
-                    self._failed_countries.add(current) if current else None
-                    self._country_rotation_active = True
-                    self.log(f"国家轮换查询失败，使用已配置备用国家: {fallback_country}")
-                    return True
-                return None
+                provider_candidates = None
             if provider_candidates is None:
-                self.log("国家轮换查询失败：接码站库存查询未返回结果")
-                return None
-            candidates.extend(provider_candidates)
-        if current:
-            self._failed_countries.add(current)
+                lookup_failed = True
+            else:
+                candidates.extend(provider_candidates)
         for country in candidates:
             country = str(country or "").strip()
-            if country and country not in self._failed_countries:
+            if country and country != current and country not in self._failed_countries:
+                if current:
+                    self._failed_countries.add(current)
                 self.country = country
                 self._country_rotation_active = True
-                self.log(f"手机号验证失败，切换到国家: {country}")
+                if lookup_failed:
+                    self.log(f"国家轮换查询失败，使用已配置备用国家: {country}")
+                else:
+                    self.log(f"手机号验证失败，切换到国家: {country}")
                 return True
+        if lookup_failed:
+            self.log("国家轮换：候选查询没有返回结果，无法判断还有没有别的国家，退回同国换号")
+            return None
+        if current:
+            self._failed_countries.add(current)
+        self.log(f"国家轮换：候选已用尽(已失败: {sorted(self._failed_countries)})")
         return False
 
     def __call__(self) -> str:
