@@ -25,6 +25,14 @@ class SmsActivation:
     metadata: dict = field(default_factory=dict)
 
 
+class PhoneNumberAcquisitionError(RuntimeError):
+    """Provider error carrying an explicit retry decision."""
+
+    def __init__(self, message: str, *, retryable: bool):
+        super().__init__(message)
+        self.retryable = retryable
+
+
 class BaseSmsProvider(ABC):
     """Base class for SMS verification code providers."""
 
@@ -147,10 +155,16 @@ class SmsActivateProvider(BaseSmsProvider):
             )
 
         if "NO_NUMBERS" in result:
-            raise RuntimeError(f"SMS-Activate: 当前无可用号码 (service={service_code}, country={country_id})")
+            raise PhoneNumberAcquisitionError(
+                f"SMS-Activate: NO_NUMBERS 当前无可用号码 (service={service_code}, country={country_id})",
+                retryable=True,
+            )
         if "NO_BALANCE" in result:
-            raise RuntimeError("SMS-Activate: 余额不足")
-        raise RuntimeError(f"SMS-Activate getNumber failed: {result}")
+            raise PhoneNumberAcquisitionError("SMS-Activate: 余额不足", retryable=False)
+        raise PhoneNumberAcquisitionError(
+            f"SMS-Activate getNumber failed: {result}",
+            retryable=False,
+        )
 
     def get_code(self, activation_id: str, *, timeout: int = 120) -> str:
         deadline = time.time() + timeout
@@ -235,10 +249,13 @@ def _safe_bool(value, default: bool) -> bool:
 
 
 PHONE_NUMBER_RETRY_ATTEMPTS = 3
+PHONE_NUMBER_RETRY_BACKOFF_SECONDS = 2
 
 
 def _is_retryable_phone_acquisition_error(exc: Exception) -> bool:
     """Return whether a failed number request may succeed if retried."""
+    if isinstance(exc, PhoneNumberAcquisitionError):
+        return exc.retryable
     if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
         return True
     if isinstance(exc, requests.HTTPError):
@@ -742,6 +759,7 @@ class HeroSmsProvider(BaseSmsProvider):
             except Exception as exc:
                 v2_error = str(exc)
 
+        v1_error = ""
         try:
             text = self._request({"action": "getNumber", **common}).text.strip()
             if text.startswith("ACCESS_NUMBER:"):
@@ -753,9 +771,17 @@ class HeroSmsProvider(BaseSmsProvider):
                         "countryPhoneCode": "",
                         "activationCost": None,
                     }
-            raise RuntimeError(text[:200])
+            v1_error = text[:200]
         except Exception as exc:
-            raise RuntimeError(f"HeroSMS 获取号码失败: V2={v2_error}; V1={exc}") from exc
+            v1_error = str(exc)
+        retryable = (
+            _is_retryable_phone_acquisition_error(RuntimeError(v2_error))
+            or _is_retryable_phone_acquisition_error(RuntimeError(v1_error))
+        )
+        raise PhoneNumberAcquisitionError(
+            f"HeroSMS 获取号码失败: V2={v2_error}; V1={v1_error}",
+            retryable=retryable,
+        )
 
     @staticmethod
     def _format_phone(number_info: dict) -> str:
@@ -1229,12 +1255,21 @@ class PhoneCallbackController:
                     break
                 except Exception as exc:
                     last_exc = exc
+                    has_fallback_country = attempt + 1 < len(countries)
+                    if has_fallback_country:
+                        self.log(
+                            f"国家({request_country})获取号码失败，回退到默认国家({countries[attempt + 1]})..."
+                        )
+                        continue
                     if not _is_retryable_phone_acquisition_error(exc) or attempt >= PHONE_NUMBER_RETRY_ATTEMPTS:
                         if self._verify_lock_acquired:
                             _HERO_SMS_VERIFY_LOCK.release()
                             self._verify_lock_acquired = False
                         raise
-                    self.log(f"获取手机号失败，将重试: {exc}")
+                    self.log(
+                        f"获取手机号失败，将在 {PHONE_NUMBER_RETRY_BACKOFF_SECONDS} 秒后重试: {exc}"
+                    )
+                    time.sleep(PHONE_NUMBER_RETRY_BACKOFF_SECONDS)
             if self.activation is None:
                 if self._verify_lock_acquired:
                     _HERO_SMS_VERIFY_LOCK.release()

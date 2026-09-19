@@ -10,6 +10,7 @@ from core.base_sms import (
     create_phone_callbacks,
     SMS_ACTIVATE_SERVICES,
     SMS_ACTIVATE_COUNTRIES,
+    PhoneNumberAcquisitionError,
 )
 import core.base_sms as sms_module
 
@@ -321,6 +322,64 @@ class TestCreatePhoneCallbacks:
         assert provider.calls == 1
         cleanup()
 
+    def test_sms_activate_no_numbers_retries_from_real_provider_error(self, monkeypatch):
+        responses = ["NO_NUMBERS", "NO_NUMBERS", "NO_NUMBERS", "ACCESS_NUMBER:act_real:+66123456789"]
+        calls = []
+        sleeps = []
+        monkeypatch.setattr("core.base_sms.time.sleep", lambda seconds: sleeps.append(seconds))
+
+        def fake_request(self, action: str, **params):
+            calls.append(action)
+            if action == "getNumber":
+                return responses.pop(0)
+            return "ACCESS"
+
+        monkeypatch.setattr(SmsActivateProvider, "_request", fake_request)
+        callback, cleanup = create_phone_callbacks(
+            "sms_activate",
+            {"sms_activate_api_key": "test"},
+            service="chatgpt",
+            country="52",
+        )
+
+        assert callback() == "+66123456789"
+        assert calls.count("getNumber") == 4
+        assert sleeps == [2, 2, 2]
+        cleanup()
+
+    def test_herosms_auto_country_falls_back_after_non_retryable_error(self, monkeypatch):
+        class FakeProvider(HeroSmsProvider):
+            def __init__(self):
+                self.calls = []
+
+            def get_best_country(self, *, service: str, min_stock: int = 20, max_price: float = 0):
+                return "99"
+
+            def get_number(self, *, service: str, country: str = ""):
+                self.calls.append(country)
+                if country == "99":
+                    raise RuntimeError("invalid country")
+                return SmsActivation(activation_id="act_auto_fallback", phone_number="+66999999999")
+
+            def cancel(self, activation_id: str) -> bool:
+                return True
+
+        provider = FakeProvider()
+        monkeypatch.setattr("core.base_sms.create_sms_provider", lambda provider_key, config: provider)
+        callback, cleanup = create_phone_callbacks(
+            "herosms",
+            {
+                "herosms_api_key": "test",
+                "herosms_auto_country": True,
+            },
+            service="chatgpt",
+            country="52",
+        )
+
+        assert callback() == "+66999999999"
+        assert provider.calls == ["99", "52"]
+        cleanup()
+
     def test_herosms_auto_country_and_fallback_share_retry_budget(self, monkeypatch):
         class FakeProvider(HeroSmsProvider):
             def __init__(self):
@@ -419,6 +478,16 @@ class TestSmsActivateProviderCountryResolution:
         assert captured["action"] == "getNumber"
         assert captured["params"]["country"] == "52"
 
+    def test_no_numbers_error_is_explicitly_retryable(self, monkeypatch):
+        monkeypatch.setattr(SmsActivateProvider, "_request", lambda self, action, **params: "NO_NUMBERS")
+        provider = SmsActivateProvider("test123", default_country="ru")
+
+        with pytest.raises(PhoneNumberAcquisitionError) as exc_info:
+            provider.get_number(service="chatgpt", country="52")
+
+        assert exc_info.value.retryable is True
+        assert "NO_NUMBERS" in str(exc_info.value)
+
 
 class TestHeroSmsProvider:
     def test_get_number_uses_v2_json(self, monkeypatch, tmp_path):
@@ -445,7 +514,39 @@ class TestHeroSmsProvider:
 
         assert activation.activation_id == "act_1"
         assert activation.phone_number == "+15551234"
-        assert calls[-1]["action"] == "getNumberV2"
+        assert [call["action"] for call in calls] == ["getPrices", "getNumberV2"]
+
+    def test_herosms_v1_no_numbers_remains_retryable_when_v2_fails(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(sms_module, "hero_sms_cache_file", lambda: tmp_path / ".herosms_phone_cache.json")
+        monkeypatch.setattr(sms_module, "_HERO_SMS_CACHE", None)
+
+        class FakeResp:
+            def __init__(self, text, status_code=200):
+                self.text = text
+                self.status_code = status_code
+
+            def raise_for_status(self):
+                if self.status_code >= 400:
+                    raise sms_module.requests.HTTPError(response=self)
+
+            def json(self):
+                raise ValueError("not json")
+
+        def fake_get(url, params, timeout=30, proxies=None):
+            action = params["action"]
+            if action == "getPrices":
+                return FakeResp("{}")
+            if action == "getNumberV2":
+                return FakeResp('{"error":"UNPROCESSABLE_ENTITY"}', status_code=422)
+            return FakeResp("NO_NUMBERS")
+
+        monkeypatch.setattr("core.base_sms.requests.get", fake_get)
+        provider = HeroSmsProvider("hero123")
+
+        with pytest.raises(PhoneNumberAcquisitionError) as exc_info:
+            provider.get_number(service="chatgpt", country="52")
+
+        assert exc_info.value.retryable is True
 
     def test_get_number_falls_back_to_v1_text(self, monkeypatch, tmp_path):
         monkeypatch.setattr(sms_module, "hero_sms_cache_file", lambda: tmp_path / ".herosms_phone_cache.json")
@@ -474,7 +575,7 @@ class TestHeroSmsProvider:
 
         assert activation.activation_id == "act_2"
         assert activation.phone_number == "+15557654321"
-        assert calls[-2:] == ["getNumberV2", "getNumber"]
+        assert calls == ["getPrices", "getNumberV2", "getNumber"]
 
     def test_get_code_skips_attempted_sms_event(self, monkeypatch, tmp_path):
         monkeypatch.setattr(sms_module, "hero_sms_cache_file", lambda: tmp_path / ".herosms_phone_cache.json")
