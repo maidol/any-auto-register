@@ -458,6 +458,167 @@ class TestCreatePhoneCallbacks:
         ]
         cleanup()
 
+    def test_country_rotation_query_failure_is_distinct_from_empty_inventory(self, monkeypatch):
+        logs = []
+
+        class FakeProvider:
+            def get_number(self, *, service: str, country: str = ""):
+                return SmsActivation(activation_id="act_query", phone_number="+52123456789")
+
+            def get_country_candidates(self, *, service: str, exclude=()):
+                raise ConnectionError("country inventory unavailable")
+
+            def cancel(self, activation_id: str) -> bool:
+                return True
+
+        provider = FakeProvider()
+        monkeypatch.setattr("core.base_sms.create_sms_provider", lambda provider_key, config: provider)
+        callback, cleanup = create_phone_callbacks(
+            "herosms",
+            {"herosms_api_key": "test"},
+            service="chatgpt",
+            country="52",
+            log_fn=logs.append,
+        )
+
+        assert callback() == "+52123456789"
+        assert callback.rotate_country() is None
+        assert callback._failed_countries == set()
+        assert any("国家轮换查询失败" in message for message in logs)
+        cleanup()
+
+    def test_country_rotation_uses_configured_fallback_when_inventory_query_fails(self, monkeypatch):
+        logs = []
+
+        class FakeProvider:
+            def get_number(self, *, service: str, country: str = ""):
+                return SmsActivation(activation_id="act_fallback", phone_number="+66123456789")
+
+            def get_country_candidates(self, *, service: str, exclude=()):
+                raise ConnectionError("inventory unavailable")
+
+            def cancel(self, activation_id: str) -> bool:
+                return True
+
+        provider = FakeProvider()
+        monkeypatch.setattr("core.base_sms.create_sms_provider", lambda provider_key, config: provider)
+        callback, cleanup = create_phone_callbacks(
+            "herosms",
+            {"herosms_api_key": "test", "sms_country": "66"},
+            service="chatgpt",
+            country="52",
+            log_fn=logs.append,
+        )
+
+        assert callback() == "+66123456789"
+        assert callback.rotate_country() is True
+        assert callback.country == "66"
+        assert any("备用国家" in message for message in logs)
+        cleanup()
+
+    def test_country_rotation_empty_inventory_is_not_query_failure(self, monkeypatch):
+        class FakeProvider:
+            def get_number(self, *, service: str, country: str = ""):
+                return SmsActivation(activation_id="act_empty", phone_number="+52123456789")
+
+            def get_country_candidates(self, *, service: str, exclude=()):
+                return []
+
+            def cancel(self, activation_id: str) -> bool:
+                return True
+
+        provider = FakeProvider()
+        monkeypatch.setattr("core.base_sms.create_sms_provider", lambda provider_key, config: provider)
+        callback, cleanup = create_phone_callbacks(
+            "herosms",
+            {"herosms_api_key": "test"},
+            service="chatgpt",
+            country="52",
+        )
+
+        assert callback() == "+52123456789"
+        assert callback.rotate_country() is False
+        assert callback._failed_countries == {"52"}
+        cleanup()
+
+    def test_herosms_get_top_countries_distinguishes_query_failure(self, monkeypatch):
+        provider = HeroSmsProvider("hero123")
+
+        def fail_request(params, **kwargs):
+            raise ConnectionError("inventory down")
+
+        monkeypatch.setattr(provider, "_request", fail_request)
+        with pytest.raises(RuntimeError, match="国家库存查询失败"):
+            provider.get_top_countries(service="chatgpt", strict=True)
+
+    def test_herosms_get_top_countries_accepts_valid_empty_inventory(self, monkeypatch):
+        provider = HeroSmsProvider("hero123")
+
+        class Response:
+            def json(self):
+                return {}
+
+        monkeypatch.setattr(provider, "_request", lambda params, **kwargs: Response())
+        assert provider.get_top_countries(service="chatgpt") == []
+
+    def test_herosms_country_candidates_filter_inventory_rows(self, monkeypatch):
+        provider = HeroSmsProvider("hero123")
+        monkeypatch.setattr(
+            provider,
+            "get_top_countries",
+            lambda service=None, strict=False: [
+                {"country": "52", "count": 10, "price": 0.1},
+                {"country": "66", "count": 0, "price": 0.1},
+                {"country": "7", "count": 5, "price": 0.2},
+                {"country": "52", "count": 20, "price": 0.3},
+                {"country": "", "count": 50, "price": 0.1},
+            ],
+        )
+        assert provider.get_country_candidates(service="chatgpt", exclude={"52"}) == ["7"]
+
+    def test_herosms_country_candidates_propagates_inventory_query_failure(self, monkeypatch):
+        provider = HeroSmsProvider("hero123")
+        monkeypatch.setattr(
+            provider,
+            "get_top_countries",
+            lambda service=None, strict=False: (_ for _ in ()).throw(ConnectionError("inventory down")),
+        )
+
+        with pytest.raises(ConnectionError, match="inventory down"):
+            provider.get_country_candidates(service="chatgpt")
+
+    def test_country_rotation_state_resets_after_success(self, monkeypatch):
+        class FakeProvider:
+            auto_report_success_on_code = True
+
+            def get_country_candidates(self, *, service: str, exclude=()):
+                return ["66"]
+
+            def get_number(self, *, service: str, country: str = ""):
+                return SmsActivation(activation_id="act_success", phone_number="+66999999999")
+
+            def get_code(self, activation_id: str, *, timeout: int = 120) -> str:
+                return "123456"
+
+            def report_success(self, activation_id: str) -> bool:
+                return True
+
+        provider = FakeProvider()
+        monkeypatch.setattr("core.base_sms.create_sms_provider", lambda provider_key, config: provider)
+        callback, cleanup = create_phone_callbacks(
+            "herosms",
+            {"herosms_api_key": "test"},
+            service="chatgpt",
+            country="52",
+        )
+
+        assert callback.rotate_country() is True
+        assert callback() == "+66999999999"
+        assert callback() == "123456"
+        assert callback._failed_countries == set()
+        assert callback._country_rotation_active is False
+        cleanup()
+
     def test_herosms_number_fetch_failure_releases_verify_lock(self, monkeypatch):
         class FakeProvider:
             def get_number(self, *, service: str, country: str = ""):

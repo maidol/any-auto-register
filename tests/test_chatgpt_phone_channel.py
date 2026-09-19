@@ -497,6 +497,7 @@ class _StubPhoneCallback:
     def __init__(self):
         self.cleanups = 0
         self.rearms = 0
+        self.rotations = 0
 
     def __call__(self):
         return "+8613800000000"
@@ -507,23 +508,37 @@ class _StubPhoneCallback:
     def rearm(self):
         self.rearms += 1
 
-
-class _CountryRotatingPhoneCallback(_StubPhoneCallback):
-    def __init__(self):
-        super().__init__()
-        self.numbers = [
-            "+8613800000000",
-            "+66959075673",
-            "+74951234567",
-        ]
-        self.rotations = 0
-
-    def __call__(self):
-        return self.numbers.pop(0)
-
     def rotate_country(self):
         self.rotations += 1
         return True
+
+
+class _CountryTracePhoneCallback:
+    def __init__(self, countries=("86", "66", "7"), *, rotate_result=True):
+        self.country = countries[0]
+        self._remaining = list(countries[1:])
+        self.rotate_result = rotate_result
+        self.events = []
+
+    def __call__(self):
+        self.events.append(("number", self.country))
+        return "+8613800000000"
+
+    def cleanup(self):
+        self.events.append(("cleanup", self.country))
+
+    def rotate_country(self):
+        next_country = self._remaining.pop(0) if self._remaining else None
+        self.events.append(("rotate", self.country, next_country))
+        if self.rotate_result is None:
+            return None
+        if not next_country:
+            return False
+        self.country = next_country
+        return True
+
+    def rearm(self):
+        self.events.append(("rearm", self.country))
 
 
 def test_whatsapp_failure_rotates_country_before_retry(monkeypatch):
@@ -534,30 +549,90 @@ def test_whatsapp_failure_rotates_country_before_retry(monkeypatch):
         "手机号提交失败: We couldn't send a text message to this phone number, "
         "so we switched to WhatsApp. Continue to send a verification code on WhatsApp."
     )
-
-    attempts = []
-    callback = _CountryRotatingPhoneCallback()
+    callback = _CountryTracePhoneCallback()
 
     def _fake_attempt(_page, phone_callback, **_kwargs):
-        attempts.append(br._parse_phone_country_and_local(phone_callback()))
+        phone_callback()
         raise RuntimeError(message)
 
     monkeypatch.setattr(br, "_do_add_phone_attempt", _fake_attempt)
     monkeypatch.setattr(br.time, "sleep", lambda *_a, **_k: None)
 
+    with pytest.raises(RuntimeError) as exc_info:
+        br._handle_add_phone_challenge(
+            _NavPage([]), callback,
+            device_id="d", user_agent="ua", log=_log, max_phone_attempts=3,
+        )
+
+    assert str(exc_info.value) == message
+    assert callback.events == [
+        ("number", "86"), ("cleanup", "86"), ("rotate", "86", "66"),
+        ("rearm", "66"), ("number", "66"), ("cleanup", "66"),
+        ("rotate", "66", "7"), ("rearm", "7"), ("number", "7"),
+        ("cleanup", "7"), ("rearm", "7"),
+    ]
+
+
+def test_existing_whatsapp_only_stub_exercises_rotation_hook(monkeypatch):
+    callback = _StubPhoneCallback()
+    message = "add_phone 只提供了 WhatsApp 渠道、没有 Text/短信选项；应当换号重试"
+    attempts = []
+
+    def _fake_attempt(_page, phone_callback, **_kwargs):
+        attempts.append(phone_callback())
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(br, "_do_add_phone_attempt", _fake_attempt)
     with pytest.raises(RuntimeError):
         br._handle_add_phone_challenge(
             _NavPage([]), callback,
             device_id="d", user_agent="ua", log=_log, max_phone_attempts=3,
         )
 
-    assert attempts == [
-        ("86", "13800000000", "China"),
-        ("66", "959075673", "Thailand"),
-        ("7", "4951234567", "Russia"),
-    ]
+    assert len(attempts) == 3
     assert callback.rotations == 2
-    assert callback.cleanups == 3 and callback.rearms == 3
+
+
+def test_whatsapp_failure_retries_when_country_query_fails(monkeypatch):
+    callback = _CountryTracePhoneCallback(countries=("86",), rotate_result=None)
+    message = "手机号提交失败: We couldn't send a text message to this phone number, so we switched to WhatsApp."
+    attempts = []
+
+    def _fake_attempt(_page, phone_callback, **_kwargs):
+        attempts.append(phone_callback())
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(br, "_do_add_phone_attempt", _fake_attempt)
+
+    with pytest.raises(RuntimeError, match="switched to WhatsApp"):
+        br._handle_add_phone_challenge(
+            _NavPage([]), callback,
+            device_id="d", user_agent="ua", log=_log, max_phone_attempts=3,
+        )
+
+    assert len(attempts) == 3
+    assert all(event[0] != "rotate" or event[2] is None for event in callback.events)
+
+
+def test_whatsapp_failure_stops_when_no_alternate_country(monkeypatch):
+    callback = _CountryTracePhoneCallback(countries=("86",))
+    message = "手机号提交失败: We couldn't send a text message to this phone number, so we switched to WhatsApp."
+    attempts = []
+
+    def _fake_attempt(_page, phone_callback, **_kwargs):
+        attempts.append(phone_callback())
+        raise RuntimeError(message)
+
+    monkeypatch.setattr(br, "_do_add_phone_attempt", _fake_attempt)
+
+    with pytest.raises(RuntimeError, match="没有可用的其他国家号码"):
+        br._handle_add_phone_challenge(
+            _NavPage([]), callback,
+            device_id="d", user_agent="ua", log=_log, max_phone_attempts=3,
+        )
+
+    assert len(attempts) == 1
+    assert callback.events == [("number", "86"), ("cleanup", "86"), ("rotate", "86", None)]
 
 
 def test_server_side_whatsapp_verdict_triggers_number_rotation(monkeypatch):
@@ -569,22 +644,22 @@ def test_server_side_whatsapp_verdict_triggers_number_rotation(monkeypatch):
     message = str(exc.value)
 
     attempts = []
+    callback = _CountryTracePhoneCallback()
 
-    def _fake_attempt(_page, _phone_callback, **_kwargs):
-        attempts.append(1)
+    def _fake_attempt(_page, phone_callback, **_kwargs):
+        attempts.append(phone_callback())
         raise RuntimeError(message)
 
     monkeypatch.setattr(br, "_do_add_phone_attempt", _fake_attempt)
     monkeypatch.setattr(br.time, "sleep", lambda *_a, **_k: None)
 
-    callback = _StubPhoneCallback()
     with pytest.raises(RuntimeError):
         br._handle_add_phone_challenge(
             _NavPage([]), callback,
             device_id="d", user_agent="ua", log=_log, max_phone_attempts=3,
         )
 
-    assert len(attempts) == 3, (
-        f"服务端认定 whatsapp 必须换号重试，实际只尝试了 {len(attempts)} 次就整轮结束"
-    )
-    assert callback.cleanups == 3 and callback.rearms == 3
+    assert len(attempts) == 3
+    assert [event for event in callback.events if event[0] == "number"] == [
+        ("number", "86"), ("number", "66"), ("number", "7")
+    ]

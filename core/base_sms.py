@@ -43,8 +43,8 @@ class BaseSmsProvider(ABC):
         """Rent a phone number for the given service."""
         ...
 
-    def get_country_candidates(self, *, service: str, exclude=()) -> list[str]:
-        """Return optional country candidates for a failed browser attempt."""
+    def get_country_candidates(self, *, service: str, exclude=()) -> list[str] | None:
+        """Return country candidates, or None when inventory lookup failed."""
         return []
 
     @abstractmethod
@@ -495,7 +495,7 @@ class HeroSmsProvider(BaseSmsProvider):
             return data
         raise RuntimeError("HeroSMS getPrices returned unexpected response")
 
-    def get_top_countries(self, service: str | None = None) -> list[dict]:
+    def get_top_countries(self, service: str | None = None, *, strict: bool = False) -> list[dict]:
         """获取指定服务按价格排序的国家列表（含价格和库存）。
 
         优先使用 getTopCountriesByServiceRank API，降级到 getPrices 全量解析。
@@ -538,7 +538,9 @@ class HeroSmsProvider(BaseSmsProvider):
                     rows.append({"country": str(country_id), "price": price, "count": count})
             rows.sort(key=lambda r: (r.get("price") or 999, -(r.get("count") or 0)))
             return rows
-        except Exception:
+        except Exception as exc:
+            if strict:
+                raise RuntimeError("HeroSMS 国家库存查询失败") from exc
             return []
 
     def _parse_top_countries_response(self, data) -> list[dict]:
@@ -594,11 +596,7 @@ class HeroSmsProvider(BaseSmsProvider):
 
     def get_country_candidates(self, *, service: str, exclude=()) -> list[str]:
         excluded = {str(item or "").strip() for item in (exclude or ())}
-        try:
-            rows = self.get_top_countries(service=service)
-        except Exception as exc:
-            logger.warning("get_country_candidates 查询失败: %s", exc)
-            return []
+        rows = self.get_top_countries(service=service, strict=True)
         return [
             str(row.get("country") or "").strip()
             for row in rows
@@ -1216,6 +1214,11 @@ class PhoneCallbackController:
             self.provider = create_sms_provider(self.provider_key, self.config)
         return self.provider
 
+    def _reset_rotation_state(self) -> None:
+        self._failed_countries.clear()
+        self._last_request_country = ""
+        self._country_rotation_active = False
+
     def rearm(self) -> None:
         """把控制器复位到可以再租一个号的状态（不释放已完成的号）。"""
         self.activation = None
@@ -1223,11 +1226,9 @@ class PhoneCallbackController:
         self.awaiting_external_success = False
         self.phase = "need_number"
 
-    def rotate_country(self) -> bool:
-        """Advance to the next provider country after a failed browser attempt."""
+    def rotate_country(self) -> bool | None:
+        """Advance country: True switched, False empty, None lookup failed."""
         current = str(self._last_request_country or self.country or "").strip()
-        if current:
-            self._failed_countries.add(current)
         provider = self._provider()
         candidates = []
         fallback_country = str(
@@ -1241,12 +1242,25 @@ class PhoneCallbackController:
         get_candidates = getattr(provider, "get_country_candidates", None)
         if callable(get_candidates):
             try:
-                candidates.extend(
-                    get_candidates(service=self.service, exclude=self._failed_countries)
-                    or []
+                provider_candidates = get_candidates(
+                    service=self.service,
+                    exclude=self._failed_countries | ({current} if current else set()),
                 )
             except Exception as exc:
                 self.log(f"国家轮换查询失败({exc})")
+                if fallback_country and fallback_country not in self._failed_countries and fallback_country != current:
+                    self.country = fallback_country
+                    self._failed_countries.add(current) if current else None
+                    self._country_rotation_active = True
+                    self.log(f"国家轮换查询失败，使用已配置备用国家: {fallback_country}")
+                    return True
+                return None
+            if provider_candidates is None:
+                self.log("国家轮换查询失败：接码站库存查询未返回结果")
+                return None
+            candidates.extend(provider_candidates)
+        if current:
+            self._failed_countries.add(current)
         for country in candidates:
             country = str(country or "").strip()
             if country and country not in self._failed_countries:
@@ -1260,6 +1274,7 @@ class PhoneCallbackController:
         if self.phase == "done":
             # 注册浏览器已经完成验证，OAuth 全新浏览器可能还需要再租一个号。
             self.log("phone_callback 已完成过一轮验证，重新进入租号阶段")
+            self._reset_rotation_state()
             self.rearm()
         provider = self._provider()
         if self.phase == "need_number":
@@ -1387,6 +1402,7 @@ class PhoneCallbackController:
             self.completed = True
             self.phase = "done"
             self.awaiting_external_success = False
+            self._reset_rotation_state()
             self.log(f"短信验证成功，已标记号码完成使用: activation_id={self.activation.activation_id}")
         if self._verify_lock_acquired:
             _HERO_SMS_VERIFY_LOCK.release()

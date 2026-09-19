@@ -2387,10 +2387,15 @@ def _handle_add_phone_challenge(
                 and phone_attempt + 1 < max_phone_attempts
                 and hasattr(phone_callback, "rotate_country")
             ):
-                if phone_callback.rotate_country():
+                rotation = phone_callback.rotate_country()
+                if rotation is True:
                     log("手机号验证失败，已切换国家后重新获取号码")
+                elif rotation is None:
+                    log("手机号验证失败：国家库存查询失败，继续原有重试预算")
                 else:
-                    raise RuntimeError("手机号验证失败：没有可用的其他国家号码，停止重试")
+                    raise RuntimeError(
+                        "手机号验证失败：没有可用的其他国家号码，停止重试"
+                    ) from last_error
             # 重置 phone_callback 状态为 need_number
             if hasattr(phone_callback, "rearm"):
                 phone_callback.rearm()
