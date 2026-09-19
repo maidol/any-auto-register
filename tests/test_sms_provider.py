@@ -516,18 +516,18 @@ class TestHeroSmsProvider:
         assert activation.phone_number == "+15551234"
         assert [call["action"] for call in calls] == ["getPrices", "getNumberV2"]
 
-    def test_herosms_v1_no_numbers_remains_retryable_when_v2_fails(self, monkeypatch, tmp_path):
+    def test_herosms_v1_no_numbers_survives_v2_deterministic_error(self, monkeypatch, tmp_path):
+        """V2's deterministic error must not suppress V1's retryable NO_NUMBERS."""
         monkeypatch.setattr(sms_module, "hero_sms_cache_file", lambda: tmp_path / ".herosms_phone_cache.json")
         monkeypatch.setattr(sms_module, "_HERO_SMS_CACHE", None)
 
         class FakeResp:
-            def __init__(self, text, status_code=200):
+            def __init__(self, text):
                 self.text = text
-                self.status_code = status_code
+                self.status_code = 200
 
             def raise_for_status(self):
-                if self.status_code >= 400:
-                    raise sms_module.requests.HTTPError(response=self)
+                return None
 
             def json(self):
                 raise ValueError("not json")
@@ -537,7 +537,7 @@ class TestHeroSmsProvider:
             if action == "getPrices":
                 return FakeResp("{}")
             if action == "getNumberV2":
-                return FakeResp('{"error":"UNPROCESSABLE_ENTITY"}', status_code=422)
+                return FakeResp('{"error":"UNPROCESSABLE_ENTITY"}')
             return FakeResp("NO_NUMBERS")
 
         monkeypatch.setattr("core.base_sms.requests.get", fake_get)
@@ -546,6 +546,8 @@ class TestHeroSmsProvider:
         with pytest.raises(PhoneNumberAcquisitionError) as exc_info:
             provider.get_number(service="chatgpt", country="52")
 
+        assert "UNPROCESSABLE_ENTITY" in str(exc_info.value)
+        assert "NO_NUMBERS" in str(exc_info.value)
         assert exc_info.value.retryable is True
 
     def test_get_number_falls_back_to_v1_text(self, monkeypatch, tmp_path):
