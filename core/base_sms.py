@@ -1192,14 +1192,29 @@ def create_sms_provider(provider_key: str, config: dict) -> BaseSmsProvider:
         api_key = str(config.get("herosms_api_key", "") or "").strip()
         if not api_key:
             raise RuntimeError("HeroSMS 未配置 API Key")
+        service = str(
+            config.get("sms_service")
+            or config.get("herosms_service")
+            or config.get("herosms_default_service")
+            or HERO_SMS_DEFAULT_SERVICE
+        ).strip()
+        openai_dr_single_use = service.lower() == "dr"
         return HeroSmsProvider(
             api_key=api_key,
-            default_service=str(config.get("sms_service") or config.get("herosms_service") or config.get("herosms_default_service") or HERO_SMS_DEFAULT_SERVICE),
+            default_service=service,
             default_country=str(config.get("sms_country") or config.get("herosms_country") or config.get("herosms_default_country") or HERO_SMS_DEFAULT_COUNTRY),
             max_price=_safe_float(config.get("herosms_max_price"), -1),
             proxy=str(config.get("sms_proxy") or config.get("proxy") or "") or None,
-            reuse_phone_to_max=_safe_bool(config.get("register_reuse_phone_to_max"), True),
-            phone_success_max=max(0, _safe_int(config.get("register_phone_extra_max") or config.get("register_phone_success_max"), 3)),
+            reuse_phone_to_max=(
+                False
+                if openai_dr_single_use
+                else _safe_bool(config.get("register_reuse_phone_to_max"), True)
+            ),
+            phone_success_max=(
+                1
+                if openai_dr_single_use
+                else max(0, _safe_int(config.get("register_phone_extra_max") or config.get("register_phone_success_max"), 3))
+            ),
         )
     if provider_key in ("smsbower", "smsbower_api"):
         api_key = str(config.get("smsbower_api_key", "") or "").strip()

@@ -71,6 +71,33 @@ class TestCreateSmsProvider:
         assert isinstance(provider, HeroSmsProvider)
         assert provider.reuse_phone_to_max is False
 
+    def test_openai_dr_forces_single_use_for_herosms_aliases(self):
+        for provider_key in ("herosms", "herosms_api"):
+            provider = create_sms_provider(
+                provider_key,
+                {
+                    "herosms_api_key": "hero123",
+                    "sms_service": "dr",
+                    "register_reuse_phone_to_max": "true",
+                    "register_phone_extra_max": "3",
+                },
+            )
+            assert provider.reuse_phone_to_max is False
+            assert provider.phone_success_max == 1
+
+    def test_non_openai_service_keeps_herosms_reuse_policy(self):
+        provider = create_sms_provider(
+            "herosms_api",
+            {
+                "herosms_api_key": "hero123",
+                "sms_service": "cursor",
+                "register_reuse_phone_to_max": "true",
+                "register_phone_extra_max": "3",
+            },
+        )
+        assert provider.reuse_phone_to_max is True
+        assert provider.phone_success_max == 3
+
     def test_herosms_missing_key(self):
         with pytest.raises(RuntimeError, match="HeroSMS 未配置"):
             create_sms_provider("herosms", {})
@@ -1015,6 +1042,29 @@ class TestHeroSmsProvider:
         assert ("hero_resend", "act_5") in events
         assert "333333" in sms_module._HERO_SMS_CACHE["used_codes"]
         assert "sms_3" in sms_module._HERO_SMS_CACHE["attempted_sms_keys"]
+
+    def test_openai_dr_success_finishes_and_clears_cache(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(sms_module, "hero_sms_cache_file", lambda: tmp_path / ".herosms_phone_cache.json")
+        monkeypatch.setattr(sms_module, "_HERO_SMS_CACHE", {
+            "api_key_hash": sms_module._hash_secret("hero123"),
+            "service": "dr",
+            "country": "187",
+            "activation_id": "act_dr",
+            "phone_number": "+15550000000",
+            "acquired_at": sms_module.time.time(),
+            "use_count": 0,
+            "used_codes": set(),
+            "attempted_sms_keys": set(),
+            "reuse_stopped": False,
+        })
+        events = []
+        provider = HeroSmsProvider("hero123", default_service="dr", reuse_phone_to_max=False, phone_success_max=1)
+        provider.last_code_result = {"code": "444444", "sms_key": "sms_dr"}
+        monkeypatch.setattr(provider, "finish_activation", lambda activation_id: events.append(("finish", activation_id)) or True)
+
+        assert provider.report_success("act_dr") is True
+        assert events == [("finish", "act_dr")]
+        assert sms_module._HERO_SMS_CACHE is None
 
     def test_report_success_finishes_activation_when_reuse_disabled(self, monkeypatch, tmp_path):
         monkeypatch.setattr(sms_module, "hero_sms_cache_file", lambda: tmp_path / ".herosms_phone_cache.json")

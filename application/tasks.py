@@ -629,6 +629,15 @@ def _int_config(value: Any, default: int) -> int:
         return default
 
 
+def _hero_task_reuse_policy(provider_key: str, settings: dict[str, Any]) -> tuple[bool, int]:
+    extra_max = max(_int_config(settings.get("register_phone_extra_max"), 3), 0)
+    is_herosms = provider_key in {"herosms", "herosms_api"}
+    is_openai_dr = str(settings.get("sms_service") or "dr").strip().lower() == "dr"
+    if is_herosms and is_openai_dr:
+        return False, extra_max
+    return _bool_config(settings.get("register_reuse_phone_to_max"), True), extra_max
+
+
 def _auto_followup_windsurf_payment(
     *,
     platform_name: str,
@@ -700,9 +709,12 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
     proxy = payload.get("proxy") or None
     extra = dict(payload.get("extra") or {})
     sms_provider_key, sms_settings = _resolve_sms_provider_for_task(extra)
-    herosms_enabled = sms_provider_key == "herosms" and bool(str(sms_settings.get("herosms_api_key") or "").strip())
-    hero_extra_max = max(_int_config(sms_settings.get("register_phone_extra_max"), 3), 0) if herosms_enabled else 0
-    hero_reuse_to_max = _bool_config(sms_settings.get("register_reuse_phone_to_max"), True) if herosms_enabled else False
+    herosms_enabled = sms_provider_key in ("herosms", "herosms_api") and bool(str(sms_settings.get("herosms_api_key") or "").strip())
+    hero_reuse_to_max, hero_extra_max = (
+        _hero_task_reuse_policy(sms_provider_key, sms_settings)
+        if herosms_enabled
+        else (False, 0)
+    )
     target_success = count
     max_success = count + hero_extra_max if herosms_enabled and hero_reuse_to_max else count
     progress_total = max_success if herosms_enabled else count
