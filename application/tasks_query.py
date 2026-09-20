@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+from application.tasks import (
+    TASK_STATUS_CANCEL_REQUESTED,
+    TASK_STATUS_CLAIMED,
+    TASK_STATUS_PENDING,
+    TASK_STATUS_RUNNING,
+    TERMINAL_TASK_STATUSES,
+)
 from core.datetime_utils import serialize_datetime
 from infrastructure.tasks_read_repository import TasksReadRepository
 
@@ -48,6 +55,13 @@ class TasksQueryService:
             "type": item.type,
             "platform": item.platform,
             "status": item.status,
+            "terminal": item.status in TERMINAL_TASK_STATUSES,
+            "cancellable": item.status in {
+                TASK_STATUS_PENDING,
+                TASK_STATUS_CLAIMED,
+                TASK_STATUS_RUNNING,
+                TASK_STATUS_CANCEL_REQUESTED,
+            },
             "progress": item.progress.label,
             "progress_detail": {
                 "current": item.progress.current,

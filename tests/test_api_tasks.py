@@ -8,6 +8,27 @@ from application.tasks import (
     _mutate_task,
     create_task,
 )
+def test_task_history_serializes_cancellable_status(client):
+    task = create_task(
+        task_type="register",
+        platform="chatgpt",
+        payload={"platform": "chatgpt", "count": 1},
+    )
+    _mutate_task(task["id"], lambda model: setattr(model, "status", TASK_STATUS_RUNNING))
+
+    response = client.get("/api/tasks")
+
+    assert response.status_code == 200
+    item = next(item for item in response.json()["items"] if item["id"] == task["id"])
+    assert item["cancellable"] is True
+    assert item["terminal"] is False
+
+    _mutate_task(task["id"], lambda model: setattr(model, "status", TASK_STATUS_SUCCEEDED))
+    response = client.get(f"/api/tasks/{task['id']}")
+
+    assert response.status_code == 200
+    assert response.json()["cancellable"] is False
+    assert response.json()["terminal"] is True
 
 
 def test_cancel_pending_task(client):
