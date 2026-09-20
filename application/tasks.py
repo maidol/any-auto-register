@@ -5,7 +5,6 @@ import json
 import threading
 import time
 import uuid
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
@@ -698,16 +697,82 @@ def _auto_followup_windsurf_payment(
         logger.add_cashier_url(cashier_url)
 
 
-def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
-    from core.proxy_pool import proxy_pool
+def _sleep_interruptible(logger: TaskLogger, seconds: float, *, slice_seconds: float = 1.0) -> bool:
+    """睡 `seconds` 秒，期间分片查取消。
 
-    count = max(int(payload.get("count", 1) or 1), 1)
-    concurrency = min(max(int(payload.get("concurrency", 1) or 1), 1), count, 5)
+    返回 False 表示被取消打断。调用方必须把这个返回值当真 —— 不能靠
+    「下一轮再查一次 is_cancel_requested()」兜底，那样在最后一个账号之后
+    会白睡满一整段间隔。
+    """
+    remaining = max(float(seconds), 0.0)
+    if remaining <= 0:
+        return True
+    deadline = time.monotonic() + remaining
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return True
+        if logger.is_cancel_requested():
+            return False
+        time.sleep(min(left, max(float(slice_seconds), 0.05)))
+
+
+def _build_proxy_snapshot(pool, size: int) -> list[str]:
+    """任务开始那一刻对代理池做一次顺序快照。
+
+    为什么必须快照而不是每次 get_next()：ProxyPool.get_next() 每次调用都按
+    success_count/(success+fail) 重新排序，而 report_success / report_fail 会改
+    这个排序键；另外 proxy_pool 是模块级单例，_index 跨任务共享。基于活池的
+    轮询因此无法保证「账号 2 拿到的不是账号 1 那个」。
+
+    拉到重复值就停 —— 静态池转完一圈正好是整池，旋转网关只有一个 URL 所以
+    第二次就停。`size` 只是上限，防止动态 provider 被一次性抽干。
+    """
+    snapshot: list[str] = []
+    for _ in range(max(int(size), 1)):
+        try:
+            url = pool.get_next()
+        except Exception:
+            break
+        if not url:
+            break
+        url = str(url).strip()
+        if not url or url in snapshot:
+            break
+        snapshot.append(url)
+    return snapshot
+
+
+def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
+    from dataclasses import replace
+
+    from core.proxy_pool import proxy_pool
+    from core.registration.strategy import (
+        CANCELLED,
+        COMPLETED,
+        PROXY_FAIL,
+        PROXY_OK,
+        AccountCycleRunner,
+        AttemptOutcome,
+        ProxyExhausted,
+        RegistrationStrategy,
+        StrategyParamError,
+        TaskProxyAllocator,
+    )
+
     platform_name = str(payload.get("platform", ""))
     email = payload.get("email") or None
     password = payload.get("password") or None
     proxy = payload.get("proxy") or None
     extra = dict(payload.get("extra") or {})
+
+    try:
+        strategy = RegistrationStrategy.from_payload(payload)
+    except StrategyParamError as exc:
+        logger.log(f"策略参数不合法: {exc}", level="error")
+        logger.finish(TASK_STATUS_FAILED, error=str(exc))
+        return
+
     sms_provider_key, sms_settings = _resolve_sms_provider_for_task(extra)
     herosms_enabled = sms_provider_key in ("herosms", "herosms_api") and bool(str(sms_settings.get("herosms_api_key") or "").strip())
     hero_reuse_to_max, hero_extra_max = (
@@ -715,14 +780,13 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
         if herosms_enabled
         else (False, 0)
     )
-    target_success = count
-    max_success = count + hero_extra_max if herosms_enabled and hero_reuse_to_max else count
-    progress_total = max_success if herosms_enabled else count
+    bonus_budget = hero_extra_max if (herosms_enabled and hero_reuse_to_max) else 0
+    progress_total = strategy.target_success + bonus_budget
 
     logger.set_progress(0, progress_total)
-    if herosms_enabled:
+    if herosms_enabled and hero_reuse_to_max:
         logger.log(
-            f"HeroSMS 模式: 成功目标 {target_success}，失败自动补尝试，"
+            f"HeroSMS 模式: 成功目标 {strategy.target_success}，"
             f"号码仍可复用时最多额外成功 {hero_extra_max} 个"
         )
 
@@ -732,9 +796,6 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
         logger.log(f"致命错误: {exc}", level="error")
         logger.finish(TASK_STATUS_FAILED, error=str(exc))
         return
-
-    success = 0
-    errors: list[str] = []
 
     # Pre-create a shared mailbox instance for the entire task to avoid
     # concurrent initialization issues (e.g. MoeMail auto-registering
@@ -759,17 +820,60 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
         logger.finish(TASK_STATUS_FAILED, error=f"邮箱初始化失败: {exc}")
         return
 
-    def _do_one(index: int) -> bool | str:
-        if logger.is_cancel_requested():
-            return "__cancel_requested__"
-        resolved_proxy = proxy or proxy_pool.get_next()
-        platform = _build_platform_instance(platform_name, payload, logger, resolved_proxy=resolved_proxy, shared_mailbox=shared_mailbox)
+    # 快照要按「可能发生多少个账号周期」算，不是按「目标成功几个」算：
+    # 失败周期也各占一个代理，按目标数算会让连续失败的周期绕回同一个代理，
+    # 正好撞上 ProxyPool.report_fail 里 fail_count >= 5 的自动禁用。
+    snapshot_budget = min(
+        strategy.target_success + bonus_budget + strategy.retry_count + 1,
+        strategy.max_attempts,
+    )
+
+    try:
+        allocator = TaskProxyAllocator(
+            _build_proxy_snapshot(proxy_pool, snapshot_budget) if not proxy else [],
+            fixed_proxy=proxy,
+            require_proxy=strategy.require_proxy,
+        )
+    except ProxyExhausted as exc:
+        logger.log(f"代理不可用: {exc}", level="error")
+        logger.finish(TASK_STATUS_FAILED, error=str(exc))
+        return
+    if allocator.snapshot:
+        logger.log(f"本次任务代理快照: {len(allocator.snapshot)} 个")
+
+    state = {"saved": 0, "index_offset": 0}
+
+    def _register_once(index: int, attempt: int, resolved_proxy: str | None) -> AttemptOutcome:
+        label = state["index_offset"] + index + 1
+        logger.log(
+            f"开始注册第 {label} 个账号"
+            f"（第 {attempt + 1}/{strategy.attempts_per_cycle} 次尝试）"
+        )
+        if resolved_proxy:
+            logger.log(f"使用代理: {resolved_proxy}")
+        platform = _build_platform_instance(
+            platform_name, payload, logger,
+            resolved_proxy=resolved_proxy, shared_mailbox=shared_mailbox,
+        )
         try:
-            logger.log(f"开始注册第 {index + 1}/{count} 个账号")
-            if resolved_proxy:
-                logger.log(f"使用代理: {resolved_proxy}")
             account = platform.register(email=email, password=password)
-            save_account(account)
+        except Exception as exc:
+            error = str(exc) or exc.__class__.__name__
+            logger.record_error(error)
+            logger.log(f"✗ 注册失败: {error}", level="error")
+            _save_task_log(platform_name, email or "", "failed", error=error)
+            return AttemptOutcome(ok=False, error=error, account_saved=False, proxy_health=PROXY_FAIL)
+
+        # 落库之后的任何失败都不得触发重试：重试会再注册一个新账号，
+        # 再消耗一次付费接码，而这一个已经拿到手了。
+        save_account(account)
+        state["saved"] += 1
+        logger.record_success()
+        logger.set_progress(min(state["saved"], progress_total), progress_total)
+        logger.log(f"✓ 注册成功: {account.email}")
+        _save_task_log(platform_name, account.email, "success")
+
+        try:
             _auto_followup_windsurf_payment(
                 platform_name=platform_name,
                 payload=payload,
@@ -777,106 +881,123 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
                 account=account,
                 logger=logger,
             )
-            if resolved_proxy:
-                proxy_pool.report_success(resolved_proxy)
-            logger.record_success()
-            logger.log(f"✓ 注册成功: {account.email}")
-            _save_task_log(platform_name, account.email, "success")
             _auto_upload_cpa(logger, account)
             _auto_push_any2api(logger, account)
-            extra = dict(account.extra or {})
-            overview = dict(extra.get("account_overview") or {})
-            cashier_url = str(extra.get("cashier_url") or overview.get("cashier_url") or "")
+            account_extra = dict(account.extra or {})
+            overview = dict(account_extra.get("account_overview") or {})
+            cashier_url = str(account_extra.get("cashier_url") or overview.get("cashier_url") or "")
             if cashier_url:
                 logger.log(f"  [升级链接] {cashier_url}")
                 logger.add_cashier_url(cashier_url)
-            return True
         except Exception as exc:
-            if resolved_proxy:
+            error = str(exc) or exc.__class__.__name__
+            logger.log(f"账号已保存，但后处理失败: {error}", level="warning")
+            return AttemptOutcome(ok=False, error=error, account_saved=True, proxy_health=PROXY_OK)
+
+        return AttemptOutcome(ok=True, account_saved=True, proxy_health=PROXY_OK)
+
+    def _cleanup(index: int, attempt: int, resolved_proxy: str | None) -> None:
+        """Phase 2 不做任何生命周期回收 —— 那是 Phase 3，单独发计划。
+
+        这里留空是刻意的：今天跨周期存活的只有 shared_mailbox 和 OAuthBrowser，
+        动它们要同时给 mailbox 加显式 close()，不属于本轮。
+        """
+        return None
+
+    def _report_proxy(resolved_proxy: str | None, health: str) -> None:
+        if not resolved_proxy:
+            return
+        try:
+            if health == PROXY_OK:
+                proxy_pool.report_success(resolved_proxy)
+            elif health == PROXY_FAIL:
                 proxy_pool.report_fail(resolved_proxy)
-            error = str(exc)
-            logger.record_error(error)
-            logger.log(f"✗ 注册失败: {error}", level="error")
-            _save_task_log(platform_name, email or "", "failed", error=error)
-            return error
+        except Exception as exc:
+            logger.log(f"代理健康上报失败: {exc}", level="warning")
+
+    def _on_event(kind: str, detail: dict[str, Any]) -> None:
+        if kind == "cleanup_failed":
+            logger.log(f"清理失败（不影响本次结果）: {detail.get('error')}", level="warning")
+
+    def _make_runner(active: RegistrationStrategy) -> AccountCycleRunner:
+        return AccountCycleRunner(
+            active,
+            allocator,
+            register_once=_register_once,
+            cleanup=_cleanup,
+            sleep=lambda secs: _sleep_interruptible(logger, secs),
+            is_cancelled=logger.is_cancel_requested,
+            report_proxy=_report_proxy,
+            on_event=_on_event,
+        )
+
+    def _hero_phone_alive() -> bool:
+        if not bonus_budget:
+            return False
+        try:
+            from core.base_sms import is_herosms_phone_cache_alive
+            alive, info = is_herosms_phone_cache_alive(sms_settings)
+            if alive:
+                logger.log(
+                    "HeroSMS 号码仍可复用: "
+                    f"{str(info.get('phone_number') or '')[:5]}**** "
+                    f"剩余 {int(info.get('remaining_seconds') or 0)} 秒，"
+                    f"已成功 {int(info.get('use_count') or 0)} 次"
+                )
+            return bool(alive)
+        except Exception:
+            return False
 
     try:
-        submitted = 0
-        completed = 0
-        futures: dict[Any, int] = {}
-        max_attempts = max(count if not herosms_enabled else max_success * 3, 1)
+        outcome = _make_runner(strategy).run()
+        errors = list(outcome.errors)
+        attempts = outcome.attempts
+        successes = outcome.successful_cycles
+        stop_reason = outcome.stop_reason
 
-        def _hero_phone_alive() -> bool:
-            if not (herosms_enabled and hero_reuse_to_max):
-                return False
-            try:
-                from core.base_sms import is_herosms_phone_cache_alive
-                alive, info = is_herosms_phone_cache_alive(sms_settings)
-                if alive:
-                    logger.log(
-                        "HeroSMS 号码仍可复用: "
-                        f"{str(info.get('phone_number') or '')[:5]}**** "
-                        f"剩余 {int(info.get('remaining_seconds') or 0)} 秒，"
-                        f"已成功 {int(info.get('use_count') or 0)} 次"
-                    )
-                return bool(alive)
-            except Exception:
-                return False
-
-        def _should_submit_more() -> bool:
-            if submitted >= max_attempts or logger.is_cancel_requested():
-                return False
-            if not herosms_enabled:
-                return submitted < count
-            if success + len(futures) >= max_success:
-                return False
-            if success < target_success:
-                return True
-            if success >= max_success:
-                return False
-            return _hero_phone_alive()
-
-        with ThreadPoolExecutor(max_workers=concurrency) as pool:
-            while _should_submit_more() and len(futures) < concurrency:
-                futures[pool.submit(_do_one, submitted)] = submitted
-                submitted += 1
-
-            while futures:
-                done, _ = wait(set(futures.keys()), return_when=FIRST_COMPLETED)
-                for future in done:
-                    futures.pop(future, None)
-                    result = future.result()
-                    completed += 1
-                    if result is True:
-                        success += 1
-                    elif result != "__cancel_requested__":
-                        errors.append(str(result))
-                    logger.set_progress(min(success if herosms_enabled else completed, progress_total), progress_total)
-                while _should_submit_more() and len(futures) < concurrency:
-                    futures[pool.submit(_do_one, submitted)] = submitted
-                    submitted += 1
-                if logger.is_cancel_requested() and not futures:
-                    break
+        # HeroSMS 号码复用：目标达成之后，只要号码还活着就继续补成功账号。
+        bonus_done = 0
+        one_more = replace(strategy, target_success=1, max_failed_cycles=1)
+        while (
+            stop_reason == COMPLETED
+            and bonus_done < bonus_budget
+            and not logger.is_cancel_requested()
+            and _hero_phone_alive()
+        ):
+            state["index_offset"] = successes + outcome.failed_cycles + bonus_done
+            bonus = _make_runner(replace(one_more, max_attempts=strategy.attempts_per_cycle)).run()
+            attempts += bonus.attempts
+            successes += bonus.successful_cycles
+            errors.extend(bonus.errors)
+            bonus_done += 1
+            if bonus.stop_reason == CANCELLED:
+                stop_reason = CANCELLED
+                break
+            if not bonus.successful_cycles:
+                break
     except Exception as exc:
         logger.log(f"致命错误: {exc}", level="error")
         logger.finish(TASK_STATUS_FAILED, error=str(exc))
         return
 
-    if herosms_enabled:
-        logger.set_result_data({
-            "target_count": target_success,
-            "attempts": submitted,
-            "success": success,
-            "fail": len(errors),
-            "extra_success": max(0, success - target_success),
-            "hero_sms_reuse": True,
-        })
-    summary = f"完成: 成功 {success} 个, 失败 {len(errors)} 个"
-    logger.log(summary, event_type="summary")
-    if logger.is_cancel_requested():
+    logger.set_result_data({
+        "stop_reason": stop_reason,
+        "attempts": attempts,
+        "successful_cycles": successes,
+        "failed_cycles": outcome.failed_cycles,
+        "target_count": strategy.target_success,
+        "extra_success": max(0, successes - strategy.target_success),
+        "hero_sms_reuse": bool(bonus_budget),
+        "strategy": strategy.as_result_dict(),
+    })
+    logger.log(
+        f"完成: 成功 {successes} 个, 失败 {len(errors)} 个（停止原因: {stop_reason}）",
+        event_type="summary",
+    )
+    if stop_reason == CANCELLED or logger.is_cancel_requested():
         logger.finish(TASK_STATUS_CANCELLED, error="任务已取消")
         return
-    final_status = TASK_STATUS_FAILED if errors and success == 0 else TASK_STATUS_SUCCEEDED
+    final_status = TASK_STATUS_FAILED if errors and successes == 0 else TASK_STATUS_SUCCEEDED
     final_error = "" if final_status == TASK_STATUS_SUCCEEDED else errors[0]
     logger.finish(final_status, error=final_error)
 
