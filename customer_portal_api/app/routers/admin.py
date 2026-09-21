@@ -27,6 +27,19 @@ class RegisterTaskRequest(BaseModel):
     executor_type: str = "protocol"
     captcha_solver: str = "auto"
     extra: dict = Field(default_factory=dict)
+    # —— 注册策略（2026-09-21 补）。必须显式声明，否则 pydantic 默认
+    # extra='ignore' 会在 model_dump() 这一步把它们静默丢掉（不报错、不记日志），
+    # 内核只能拿到默认值 —— 重试次数和两个间隔就永远是 0。
+    # 取值范围由 RegistrationStrategy.from_payload 统一校验，这里不重复。
+    # 注意：max_attempts 故意不在这里暴露 —— 它的默认值是算出来的
+    # (target*(retry+1)*ATTEMPT_BUDGET_FACTOR)，写成带字面默认值的字段会
+    # 无条件吐出 0，撞上 from_payload 的下界 1 而让每个任务都失败。
+    retry_count: int = 0
+    retry_interval_seconds: float = 0.0
+    account_interval_seconds: float = 0.0
+    proxy_strategy: str = "round_robin"
+    clean_browser_context: bool = True
+    require_proxy: bool = False
 
 
 class AccountCreateRequest(BaseModel):

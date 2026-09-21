@@ -197,6 +197,9 @@ function RegisterModal({
   const [configLoading, setConfigLoading] = useState(true)
   const [regCount, setRegCount] = useState(1)
   const [concurrency, setConcurrency] = useState(1)
+  const [retryCount, setRetryCount] = useState(0)
+  const [retryInterval, setRetryInterval] = useState(0)
+  const [accountInterval, setAccountInterval] = useState(0)
   const [selection, setSelection] = useState({
     identityProvider: '',
     oauthProvider: '',
@@ -336,6 +339,9 @@ function RegisterModal({
         method: 'POST',
         body: JSON.stringify({
           platform, count: regCount, concurrency,
+          retry_count: retryCount,
+          retry_interval_seconds: retryInterval,
+          account_interval_seconds: accountInterval,
           executor_type: selection.executorType,
           captcha_solver: 'auto',
           proxy: null,
@@ -439,8 +445,29 @@ function RegisterModal({
                   </div>
                   <div>
                     <label className="text-xs text-[var(--text-muted)] block mb-1">并发数</label>
-                    <input type="number" min={1} max={5} value={concurrency}
+                    <input type="number" min={1} max={1} value={concurrency}
                       onChange={e => setConcurrency(Number(e.target.value))}
+                      className="control-surface control-surface-compact text-center" />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-3 gap-3">
+                  <div>
+                    <label className="text-xs text-[var(--text-muted)] block mb-1">失败重试次数</label>
+                    <input type="number" min={0} max={10} value={retryCount}
+                      onChange={e => setRetryCount(Number(e.target.value))}
+                      className="control-surface control-surface-compact text-center" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-[var(--text-muted)] block mb-1">重试间隔(秒)</label>
+                    <input type="number" min={0} max={3600} value={retryInterval}
+                      onChange={e => setRetryInterval(Number(e.target.value))}
+                      className="control-surface control-surface-compact text-center" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-[var(--text-muted)] block mb-1">账号间隔(秒)</label>
+                    <input type="number" min={0} max={3600} value={accountInterval}
+                      onChange={e => setAccountInterval(Number(e.target.value))}
                       className="control-surface control-surface-compact text-center" />
                   </div>
                 </div>

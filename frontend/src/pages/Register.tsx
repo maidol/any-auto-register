@@ -16,6 +16,9 @@ const DEFAULT_FORM: Record<string, any> = {
   email: '',
   password: '',
   count: 1,
+  retry_count: 0,
+  retry_interval_seconds: 0,
+  account_interval_seconds: 0,
   proxy: '',
   executor_type: '',
   captcha_solver: 'auto',
@@ -267,6 +270,9 @@ export default function Register() {
         email: form.email || null,
         password: form.password || null,
         count: form.count,
+        retry_count: form.retry_count,
+        retry_interval_seconds: form.retry_interval_seconds,
+        account_interval_seconds: form.account_interval_seconds,
         proxy: form.proxy || null,
         executor_type: form.executor_type,
         captcha_solver: 'auto',
@@ -372,6 +378,11 @@ export default function Register() {
               <div className="grid gap-4 md:grid-cols-2">
                 <Input label="批量数量" k="count" type="number" />
                 <Input label="代理 (可选)" k="proxy" placeholder="http://user:pass@host:port" />
+              </div>
+              <div className="grid gap-4 md:grid-cols-3">
+                <Input label="失败重试次数" k="retry_count" type="number" />
+                <Input label="重试间隔 (秒)" k="retry_interval_seconds" type="number" />
+                <Input label="账号间隔 (秒)" k="account_interval_seconds" type="number" />
               </div>
             </CardContent>
           </Card>
