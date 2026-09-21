@@ -748,6 +748,7 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
 
     from core.base_mailbox import PinnedMailbox
     from core.proxy_pool import proxy_pool
+    from core.registration.errors import RegistrationAttemptError
     from core.registration.strategy import (
         CANCELLED,
         COMPLETED,
@@ -849,7 +850,8 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
     # MailboxIdentityProvider.resolve() 于是每次都要一个新邮箱。用 attempt == 0
     # 认周期起点，是因为 AccountCycleRunner 的 cleanup 钩子是每次尝试调的，
     # 而 index 在 HeroSMS 补单那几个 runner 里会从 0 重新开始。
-    cycle: dict[str, Any] = {"mailbox": None, "open": False}
+    # password 与 mailbox 同寿命：一轮 = 一对凭据。
+    cycle: dict[str, Any] = {"mailbox": None, "open": False, "password": None, "resume": None}
 
     def _close_cycle() -> None:
         """结束当前周期：丢掉钉住的邮箱，按开关拆掉 provider 侧浏览器。"""
@@ -857,6 +859,8 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
             return
         cycle["open"] = False
         cycle["mailbox"] = None
+        cycle["password"] = None
+        cycle["resume"] = None
         if shared_mailbox is None or not strategy.clean_browser_context:
             return
         close = getattr(shared_mailbox, "close", None)
@@ -882,12 +886,35 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
         )
         if resolved_proxy:
             logger.log(f"使用代理: {resolved_proxy}")
+        attempt_payload = payload
+        if cycle["resume"]:
+            # 本轮已经在平台侧建出账号：把检查点顺着 extra 递给插件，
+            # 让它走恢复路径而不是再进注册入口。
+            attempt_payload = dict(payload)
+            attempt_payload["extra"] = {**extra, "registration_resume": dict(cycle["resume"])}
         platform = _build_platform_instance(
-            platform_name, payload, logger,
+            platform_name, attempt_payload, logger,
             resolved_proxy=resolved_proxy, shared_mailbox=cycle["mailbox"],
         )
+        if not cycle["password"]:
+            cycle["password"] = password or platform.new_registration_password()
         try:
-            account = platform.register(email=email, password=password)
+            account = platform.register(email=email, password=cycle["password"])
+        except RegistrationAttemptError as exc:
+            error = str(exc) or exc.__class__.__name__
+            if exc.account_created:
+                cycle["resume"] = {"stage": exc.stage, "email": exc.email or email or ""}
+                # 这一对凭据现在是孤儿账号唯一的线索，落进任务日志才救得回来。
+                logger.log(
+                    f"本轮账号已在平台侧建好但未完成（{exc.stage}）："
+                    f"{exc.email or '-'} / {exc.password or cycle['password'] or '-'}；"
+                    "下一次尝试将直接续做，不再重新注册",
+                    level="warning",
+                )
+            logger.record_error(error)
+            logger.log(f"✗ 注册失败: {error}", level="error")
+            _save_task_log(platform_name, exc.email or email or "", "failed", error=error)
+            return AttemptOutcome(ok=False, error=error, account_saved=False, proxy_health=PROXY_FAIL)
         except Exception as exc:
             error = str(exc) or exc.__class__.__name__
             logger.record_error(error)

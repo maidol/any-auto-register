@@ -10,6 +10,7 @@ from .errors import (
     CaptchaConfigurationError,
     IdentityResolutionError,
     OtpTimeoutError,
+    RegistrationAttemptError,
     RegistrationError,
     RegistrationUnsupportedError,
 )
@@ -29,6 +30,7 @@ __all__ = [
     "ProtocolMailboxFlow",
     "ProtocolOAuthAdapter",
     "ProtocolOAuthFlow",
+    "RegistrationAttemptError",
     "RegistrationError",
     "RegistrationArtifacts",
     "RegistrationCapability",

@@ -87,6 +87,16 @@ class BasePlatform(ABC):
     def _prepare_registration_password(self, password: str | None) -> str | None:
         return password or self._make_random_password()
 
+    def new_registration_password(self) -> str:
+        """给调度层用的公开入口：按本平台的规则现生成一个注册密码。
+
+        账号周期要钉住的是**一对**凭据。密码留在 register() 里现生成，
+        周期内第二次尝试就会拿着新密码去登录第一次建好的账号。
+        调度层用这个钩子把密码取一次、之后每次尝试原样传回来；
+        各平台的强度规则仍然由 _prepare_registration_password 的重写决定。
+        """
+        return self._prepare_registration_password(None) or ""
+
     def _should_require_identity_email(self) -> bool:
         return self._get_identity_provider_name() != "oauth_browser"
 

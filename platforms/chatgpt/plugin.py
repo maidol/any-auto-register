@@ -170,6 +170,7 @@ class ChatGPTPlatform(BasePlatform):
             browser_register_runner=lambda worker, ctx, artifacts: worker.run(
                 email=ctx.identity.email or "",
                 password=ctx.password or "",
+                resume_stage=str((ctx.extra.get("registration_resume") or {}).get("stage") or ""),
             ),
             oauth_runner=self._run_protocol_oauth,
             capability=RegistrationCapability(oauth_headless_requires_browser_reuse=True),

@@ -13,6 +13,8 @@ from camoufox.sync_api import Camoufox
 
 from core.base_sms import HeroSmsCodeTimeoutError
 
+from core.registration.errors import RegistrationAttemptError
+
 from .constants import (
     OPENAI_AUTH,
     CHATGPT_APP,
@@ -2317,6 +2319,16 @@ def _is_email_otp(state: dict) -> bool:
     return str(state.get("page_type") or "") == "email_otp_verification" or "email-verification" in target or "email-otp" in target
 
 
+def _is_email_otp_url(url: str) -> bool:
+    """浏览器**当前**是否已经停在邮箱验证码页。
+
+    `_is_email_otp(state)` 认的是 state（含 continue_url，即「下一步」），
+    这个认的是 page.url（即「现在」）。两者在流程里是不同的问题。
+    """
+    text = str(url or "").lower()
+    return "email-verification" in text or "email-otp" in text
+
+
 def _is_about_you(state: dict) -> bool:
     target = f"{state.get('continue_url') or ''} {state.get('current_url') or ''}".lower()
     return str(state.get("page_type") or "") == "about_you" or "about-you" in target
@@ -4121,6 +4133,23 @@ def _browser_registration_flow(page, email: str, password: str, otp_callback, ph
         if _is_email_otp(state):
             if not otp_callback:
                 raise RuntimeError("ChatGPT 注册需要邮箱验证码但未提供 otp_callback")
+            # state 认的是 continue_url —— 那是「下一步在哪」，不是「浏览器在哪」。
+            # 兄弟分支 about_you 会先把页面带过去，这一条以前不会，于是往上一页
+            # 的 DOM 里打验证码，报「验证码页未找到可填写输入框」。
+            target_url = _normalize_url(
+                str(state.get("continue_url") or state.get("current_url") or ""),
+                OPENAI_AUTH,
+            )
+            current_url = str(page.url or "")
+            if target_url and not _is_email_otp_url(current_url):
+                log(f"跳转到验证码页面: {target_url[:120]}")
+                page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+            # 取码之前先确认页面上真有输入框：验证码是一次性的，先取后失败
+            # 等于把这一封烧掉，重试也拿不回来。
+            if not _wait_for_any_selector(page, OTP_INPUT_SELECTORS, timeout=12):
+                raise RuntimeError(
+                    f"验证码页未渲染出输入框（未取码）: url={str(page.url or '')[:120]}"
+                )
             log("等待 ChatGPT 验证码")
             code = otp_callback()
             if not code:
@@ -4207,33 +4236,49 @@ class ChatGPTBrowserRegister:
         self.phone_callback = phone_callback
         self.log = log_fn
 
-    def run(self, email: str, password: str) -> dict:
-        proxy = _build_proxy_config(self.proxy)
-        launch_opts = {"headless": self.headless}
-        if proxy:
-            launch_opts["proxy"] = proxy
-            launch_opts["geoip"] = True
+    def run(self, email: str, password: str, resume_stage: str = "") -> dict:
+        account_created = resume_stage in RegistrationAttemptError.RESUMABLE_STAGES
+        if account_created:
+            # 本轮上一次尝试已经把账号建出来了。再走一遍注册入口就是拿老账号
+            # 去注册：入口会把流程带进登录/验证码分支，而那条分支的每一步
+            # 都在按「新账号」的预期推进。这里直接补做缺的那一段 OAuth。
+            self.log(f"本轮已建好账号（{resume_stage}），跳过注册状态机，直接补做 OAuth")
+        else:
+            proxy = _build_proxy_config(self.proxy)
+            launch_opts = {"headless": self.headless}
+            if proxy:
+                launch_opts["proxy"] = proxy
+                launch_opts["geoip"] = True
 
-        with Camoufox(**launch_opts) as browser:
-            page = browser.new_page()
-            self.log("启动浏览器上下文注册状态机")
-            final_state = _browser_registration_flow(
-                page,
-                email,
-                password,
-                self.otp_callback,
-                self.phone_callback,
-                self.log,
-            )
-            self.log(f"注册流程完成: page={final_state.get('page_type') or '-'}")
+            with Camoufox(**launch_opts) as browser:
+                page = browser.new_page()
+                self.log("启动浏览器上下文注册状态机")
+                try:
+                    final_state = _browser_registration_flow(
+                        page,
+                        email,
+                        password,
+                        self.otp_callback,
+                        self.phone_callback,
+                        self.log,
+                    )
+                except Exception as exc:
+                    raise RegistrationAttemptError(
+                        str(exc) or exc.__class__.__name__,
+                        stage="signup_started",
+                        email=email,
+                        password=password,
+                    ) from exc
+                account_created = True
+                self.log(f"注册流程完成: page={final_state.get('page_type') or '-'}")
 
-            # 获取 session token 和 cookies
-            cookies_dict = _get_cookies(page)
+                # 获取 session token 和 cookies
+                cookies_dict = _get_cookies(page)
 
-            # ═══ 通过 Codex CLI OAuth 获取正确的 token ═══
-            # 注册完成后的浏览器上下文 session 状态不稳定（NS_BINDING_ABORTED），
-            # 直接用全新浏览器做 OAuth 更可靠
-            self.log("执行 Codex CLI OAuth 流程获取 token...")
+                # ═══ 通过 Codex CLI OAuth 获取正确的 token ═══
+                # 注册完成后的浏览器上下文 session 状态不稳定（NS_BINDING_ABORTED），
+                # 直接用全新浏览器做 OAuth 更可靠
+                self.log("执行 Codex CLI OAuth 流程获取 token...")
 
         # 直接用全新浏览器做 OAuth（注册后的浏览器上下文不可靠）
         codex_result = self._retry_oauth_fresh_browser(email, password)
@@ -4249,7 +4294,12 @@ class ChatGPTBrowserRegister:
                 "cookies": "", "profile": {},
             }
 
-        raise RuntimeError("ChatGPT 注册未完成完整 OAuth callback，已拒绝回退到 session/access_token 半成品结果")
+        raise RegistrationAttemptError(
+            "ChatGPT 注册未完成完整 OAuth callback，已拒绝回退到 session/access_token 半成品结果",
+            stage="account_created" if account_created else "signup_started",
+            email=email,
+            password=password,
+        )
 
     def _retry_oauth_fresh_browser(self, email, password):
         """在全新浏览器 context 里做 Codex OAuth（绕过 add_phone session）。"""

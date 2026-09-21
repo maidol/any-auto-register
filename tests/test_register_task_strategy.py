@@ -37,6 +37,10 @@ class FakePlatform:
         self.world = world
         self.proxy = proxy
 
+    def new_registration_password(self) -> str:
+        """生产里由 BasePlatform 提供；调度层每轮取一次，之后原样传回来。"""
+        return "cycle-password"
+
     def register(self, email=None, password=None):
         w = self.world
         attempt_no = len(w.register_calls)
