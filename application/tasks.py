@@ -746,6 +746,7 @@ def _build_proxy_snapshot(pool, size: int) -> list[str]:
 def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
     from dataclasses import replace
 
+    from core.base_mailbox import PinnedMailbox
     from core.proxy_pool import proxy_pool
     from core.registration.strategy import (
         CANCELLED,
@@ -843,7 +844,37 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
 
     state = {"saved": 0, "index_offset": 0}
 
+    # —— 账号周期的身份与生命周期边界（需求 1d + 需求 4）——
+    # 「轮」在调度内核里是有的，在这一层原本没有：每次尝试都新造一个 platform，
+    # MailboxIdentityProvider.resolve() 于是每次都要一个新邮箱。用 attempt == 0
+    # 认周期起点，是因为 AccountCycleRunner 的 cleanup 钩子是每次尝试调的，
+    # 而 index 在 HeroSMS 补单那几个 runner 里会从 0 重新开始。
+    cycle: dict[str, Any] = {"mailbox": None, "open": False}
+
+    def _close_cycle() -> None:
+        """结束当前周期：丢掉钉住的邮箱，按开关拆掉 provider 侧浏览器。"""
+        if not cycle["open"]:
+            return
+        cycle["open"] = False
+        cycle["mailbox"] = None
+        if shared_mailbox is None or not strategy.clean_browser_context:
+            return
+        close = getattr(shared_mailbox, "close", None)
+        if not callable(close):
+            return
+        try:
+            close()
+        except Exception as exc:
+            logger.log(f"邮箱清理失败（不影响本轮结果）: {exc}", level="warning")
+
+    def _open_cycle() -> None:
+        _close_cycle()
+        cycle["mailbox"] = PinnedMailbox(shared_mailbox) if shared_mailbox is not None else None
+        cycle["open"] = True
+
     def _register_once(index: int, attempt: int, resolved_proxy: str | None) -> AttemptOutcome:
+        if attempt == 0:
+            _open_cycle()
         label = state["index_offset"] + index + 1
         logger.log(
             f"开始注册第 {label} 个账号"
@@ -853,7 +884,7 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
             logger.log(f"使用代理: {resolved_proxy}")
         platform = _build_platform_instance(
             platform_name, payload, logger,
-            resolved_proxy=resolved_proxy, shared_mailbox=shared_mailbox,
+            resolved_proxy=resolved_proxy, shared_mailbox=cycle["mailbox"],
         )
         try:
             account = platform.register(email=email, password=password)
@@ -979,6 +1010,10 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
         logger.log(f"致命错误: {exc}", level="error")
         logger.finish(TASK_STATUS_FAILED, error=str(exc))
         return
+    finally:
+        # 最后一轮也要清。「下一轮开始前再清」会把它漏掉，而那正是任务
+        # 结束后仍然留着一个浏览器进程的那一份。
+        _close_cycle()
 
     logger.set_result_data({
         "stop_reason": stop_reason,

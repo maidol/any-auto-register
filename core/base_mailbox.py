@@ -47,6 +47,15 @@ class BaseMailbox(ABC):
         """等待并返回验证链接。默认由具体 provider 自行实现。"""
         raise NotImplementedError(f"{self.__class__.__name__} 暂不支持 wait_for_link()")
 
+    def close(self) -> None:
+        """释放本 provider 持有的进程级资源（浏览器、线程池）。
+
+        默认什么都不做：今天 12 个 provider 里只有 TempMailWebMailbox 真的
+        持有浏览器，其余都是无状态 HTTP 客户端。调用方按账号周期调用它，
+        必须允许重复调用。
+        """
+        return None
+
 
 class FallbackMailbox(BaseMailbox):
     """按顺序尝试多个 provider，创建邮箱成功后固定使用同一 provider 收件。"""
@@ -115,6 +124,71 @@ class FallbackMailbox(BaseMailbox):
             timeout=timeout,
             before_ids=before_ids,
         )
+
+    def close(self) -> None:
+        """关掉每一个下游 provider。
+
+        一个 provider 抛异常不得挡住后面的 —— 调用方那层 try/except 只会把它
+        记成一条警告，剩下几个浏览器就静默留着了。
+        """
+        for _key, mailbox in self.providers:
+            try:
+                mailbox.close()
+            except Exception as exc:
+                logger.warning("邮箱 provider %s 关闭失败: %s", _key, exc)
+
+
+class PinnedMailbox(BaseMailbox):
+    """把一个账号周期之内的邮箱地址钉住，其余调用原样转发。
+
+    为什么需要它：每次尝试都会新造一个 platform 实例，
+    `MailboxIdentityProvider.resolve()` 于是无条件调一次 `get_email()`，
+    而 12 个 provider 里有 10 个每次调用都开一个新地址 —— 「同一个邮箱重试
+    3 次」实际是「3 个邮箱各试 1 次」。
+
+    `get_current_ids()` 绝不能跟着缓存。它是 `wait_for_code` 的 before_ids
+    地板，必须停在本次尝试开始那一刻。
+    """
+
+    def __init__(self, wrapped: BaseMailbox) -> None:
+        self.wrapped = wrapped
+        self._pinned: MailboxAccount | None = None
+
+    def get_email(self) -> MailboxAccount:
+        if self._pinned is None:
+            self._pinned = self.wrapped.get_email()
+        return self._pinned
+
+    def get_current_ids(self, account: MailboxAccount) -> set:
+        return self.wrapped.get_current_ids(account)
+
+    def wait_for_code(self, account: MailboxAccount, keyword: str = "",
+                      timeout: int = 120, before_ids: set = None,
+                      code_pattern: str = None) -> str:
+        return self.wrapped.wait_for_code(
+            account,
+            keyword=keyword,
+            timeout=timeout,
+            before_ids=before_ids,
+            code_pattern=code_pattern,
+        )
+
+    def wait_for_link(self, account: MailboxAccount, keyword: str = "",
+                      timeout: int = 120, before_ids: set = None) -> str:
+        return self.wrapped.wait_for_link(
+            account,
+            keyword=keyword,
+            timeout=timeout,
+            before_ids=before_ids,
+        )
+
+    def __getattr__(self, name: str):
+        """平台代码会直接摸 provider 上的自定义方法，不能被包装层挡住。"""
+        try:
+            wrapped = self.__dict__["wrapped"]
+        except KeyError:
+            raise AttributeError(name) from None
+        return getattr(wrapped, name)
 
 
 def _extract_verification_link(text: str, keyword: str = "") -> str | None:
@@ -901,7 +975,11 @@ class TempMailWebMailbox(BaseMailbox):
             time.sleep(5)
         raise TimeoutError(f"等待验证链接超时 ({timeout}s)")
 
-    def __del__(self):
+    def close(self) -> None:
+        """退出浏览器并关掉它那条线程，句柄清空以便下一轮重新开。
+
+        必须幂等：账号周期结束会调一次，任务收尾还会再调一次。
+        """
         executor = getattr(self, "_executor", None)
         browser = getattr(self, "_browser", None)
         if executor is not None and browser is not None:
@@ -914,6 +992,15 @@ class TempMailWebMailbox(BaseMailbox):
                 executor.shutdown(wait=False, cancel_futures=False)
             except Exception:
                 pass
+        self._executor = None
+        self._browser = None
+        self._page = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 class DuckMailMailbox(BaseMailbox):
