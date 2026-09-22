@@ -5,12 +5,12 @@
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 MAX_TARGET_SUCCESS = 50
 MAX_RETRY_COUNT = 10
-MAX_INTERVAL_SECONDS = 3600
 ATTEMPT_BUDGET_FACTOR = 3
 
 CANCELLED = "cancelled"
@@ -57,7 +57,12 @@ class RegistrationStrategy:
                 raise StrategyParamError(f"{name} 超出范围 [{lo}, {hi}]，收到 {value}")
             return value
 
-        def _num(name: str, default: float, lo: float, hi: float) -> float:
+        def _num(
+            name: str,
+            default: float,
+            lo: float,
+            hi: float | None = None,
+        ) -> float:
             raw = payload.get(name, default)
             if raw is None or raw == "":
                 raw = default
@@ -65,8 +70,12 @@ class RegistrationStrategy:
                 value = float(raw)
             except (TypeError, ValueError):
                 raise StrategyParamError(f"{name} 必须是数字，收到 {raw!r}")
-            if value < lo or value > hi:
-                raise StrategyParamError(f"{name} 超出范围 [{lo}, {hi}]，收到 {value}")
+            if not math.isfinite(value) or value < lo or (hi is not None and value > hi):
+                if hi is None:
+                    bounds = f"[{lo}, +∞)"
+                else:
+                    bounds = f"[{lo}, {hi}]"
+                raise StrategyParamError(f"{name} 超出范围 {bounds}，收到 {value}")
             return value
 
         concurrency = payload.get("concurrency", 1)
@@ -89,8 +98,8 @@ class RegistrationStrategy:
         return cls(
             target_success=target_success,
             retry_count=retry_count,
-            retry_interval_seconds=_num("retry_interval_seconds", 0.0, 0.0, MAX_INTERVAL_SECONDS),
-            account_interval_seconds=_num("account_interval_seconds", 0.0, 0.0, MAX_INTERVAL_SECONDS),
+            retry_interval_seconds=_num("retry_interval_seconds", 0.0, 0.0),
+            account_interval_seconds=_num("account_interval_seconds", 0.0, 0.0),
             max_attempts=max_attempts,
             max_failed_cycles=max_failed_cycles,
             proxy_strategy=strategy_name,

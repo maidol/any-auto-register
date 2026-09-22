@@ -460,13 +460,13 @@ function RegisterModal({
                   </div>
                   <div>
                     <label className="text-xs text-[var(--text-muted)] block mb-1">重试间隔(秒)</label>
-                    <input type="number" min={0} max={3600} value={retryInterval}
+                    <input type="number" min={0} value={retryInterval}
                       onChange={e => setRetryInterval(Number(e.target.value))}
                       className="control-surface control-surface-compact text-center" />
                   </div>
                   <div>
                     <label className="text-xs text-[var(--text-muted)] block mb-1">账号间隔(秒)</label>
-                    <input type="number" min={0} max={3600} value={accountInterval}
+                    <input type="number" min={0} value={accountInterval}
                       onChange={e => setAccountInterval(Number(e.target.value))}
                       className="control-surface control-surface-compact text-center" />
                   </div>

@@ -120,6 +120,20 @@ def test_out_of_range_retry_count_is_rejected_not_silently_clamped():
         RegistrationStrategy.from_payload(RegisterTaskRequest(**body).model_dump())
 
 
+def test_large_intervals_survive_http_boundary_unchanged():
+    body = dict(
+        FRONTEND_BODY,
+        retry_interval_seconds=3601,
+        account_interval_seconds=999999,
+    )
+    strategy = RegistrationStrategy.from_payload(
+        RegisterTaskRequest(**body).model_dump()
+    )
+
+    assert strategy.retry_interval_seconds == 3601.0
+    assert strategy.account_interval_seconds == 999999.0
+
+
 # --- customer_portal_api 的两份同名模型：AST 平价检查 -----------------------
 
 PORTAL_MODELS = [

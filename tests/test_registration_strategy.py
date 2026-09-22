@@ -120,9 +120,24 @@ def test_out_of_range_params_are_rejected():
     with pytest.raises(StrategyParamError):
         RegistrationStrategy.from_payload({"count": 1, "retry_count": -1})
     with pytest.raises(StrategyParamError):
-        RegistrationStrategy.from_payload({"count": 1, "retry_interval_seconds": 999999})
+        RegistrationStrategy.from_payload({"count": 1, "retry_interval_seconds": -1})
+    with pytest.raises(StrategyParamError):
+        RegistrationStrategy.from_payload({"count": 1, "account_interval_seconds": -1})
     with pytest.raises(StrategyParamError):
         RegistrationStrategy.from_payload({"count": 1, "proxy_strategy": "random"})
+
+
+def test_intervals_above_one_hour_are_accepted():
+    strategy = RegistrationStrategy.from_payload(
+        {
+            "count": 1,
+            "retry_interval_seconds": 3601,
+            "account_interval_seconds": 999999,
+        }
+    )
+
+    assert strategy.retry_interval_seconds == 3601.0
+    assert strategy.account_interval_seconds == 999999.0
 
 
 def test_attempt_budget_defaults_to_three_times_the_nominal_work():
