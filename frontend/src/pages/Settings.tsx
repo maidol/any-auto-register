@@ -295,6 +295,19 @@ const TABS: { id: string; label: string; icon: any; sections?: any[] }[] = [
         { key: 'any2api_url', label: 'API URL', placeholder: 'https://your-any2api.example.com' },
         { key: 'any2api_password', label: 'Password', secret: true },
       ],
+    }, {
+      section: 'Sub2API',
+      desc: '账号列表勾选后手动导入；开启定时后，开启之后新注册的账号会被自动导入（已导入的不会重复）',
+      items: [
+        { key: 'sub2api_url', label: 'API URL', placeholder: 'https://your-sub2api.example.com' },
+        { key: 'sub2api_admin_key', label: 'Admin API Key', secret: true },
+        {
+          key: 'sub2api_auto_sync',
+          label: '定时自动导入新增账号',
+          options: [{ value: '0', label: '关闭' }, { value: '1', label: '开启' }],
+        },
+        { key: 'sub2api_sync_interval_minutes', label: '同步间隔（分钟）', placeholder: '10' },
+      ],
     }],
   },
 ]

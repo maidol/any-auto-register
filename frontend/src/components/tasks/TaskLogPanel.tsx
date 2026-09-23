@@ -56,10 +56,24 @@ export function TaskLogPanel({
       }
     }
 
+    const drainEvents = async () => {
+      // 已结束的任务：SSE 可能还没把历史回放完，先把 /events 分页拉干净再收尾，
+      // 否则 pushEvent(done) 会先把 SSE 关掉，重新打开日志只看到空白或半截。
+      for (;;) {
+        const data = await apiFetch(`/tasks/${taskId}/events?since=${cursorRef.current}&limit=500`)
+        const items = data.items || []
+        for (const item of items) {
+          pushEvent(item)
+        }
+        if (items.length < 500) return
+      }
+    }
+
     const syncTask = async () => {
       const latest = await apiFetch(`/tasks/${taskId}`)
       setTask(latest)
       if (isTerminalTaskStatus(latest.status) && !doneRef.current) {
+        await drainEvents()
         pushEvent({ done: true, status: latest.status })
       }
     }

@@ -2402,9 +2402,16 @@ def _handle_add_phone_challenge(
                 log=log, resume_url=resume_url,
             )
             return result
-        except HeroSmsCodeTimeoutError:
-            log("⚠️ HeroSMS 等待短信验证码超时，号码已取消，终止当前注册流程")
-            raise
+        except HeroSmsCodeTimeoutError as exc:
+            # provider 超时时已经 cancel 了号码，这里只复位控制器，下一轮重新租号。
+            last_error = exc
+            log(
+                f"⚠️ 等待短信验证码超时，号码已释放"
+                f"（第 {phone_attempt + 1}/{max_phone_attempts} 个号码）"
+            )
+            if phone_attempt + 1 < max_phone_attempts and hasattr(phone_callback, "rearm"):
+                phone_callback.rearm()
+            continue
         except RuntimeError as exc:
             last_error = exc
             error_msg = str(exc)

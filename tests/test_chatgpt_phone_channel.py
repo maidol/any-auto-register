@@ -541,23 +541,47 @@ class _CountryTracePhoneCallback:
         self.events.append(("rearm", self.country))
 
 
-def test_herosms_timeout_terminates_without_phone_retry(monkeypatch):
+def test_code_timeout_releases_number_and_retries_twice_then_fails(monkeypatch):
     callback = _CountryTracePhoneCallback()
     attempts = []
 
     def _fake_attempt(_page, _phone_callback, **_kwargs):
         attempts.append(1)
-        raise br.HeroSmsCodeTimeoutError("act_timeout")
+        raise br.HeroSmsCodeTimeoutError(f"act_timeout_{len(attempts)}")
 
     monkeypatch.setattr(br, "_do_add_phone_attempt", _fake_attempt)
-    with pytest.raises(br.HeroSmsCodeTimeoutError, match="act_timeout"):
+    monkeypatch.setattr(br.time, "sleep", lambda *_args: None)
+    with pytest.raises(br.HeroSmsCodeTimeoutError, match="act_timeout_3"):
         br._handle_add_phone_challenge(
             _NavPage([]), callback,
             device_id="d", user_agent="ua", log=_log, max_phone_attempts=3,
         )
 
-    assert len(attempts) == 1
-    assert callback.events == []
+    # 1 次 + 换号重试 2 次；号码在 provider 超时时已经释放，这里只复位不再 cleanup，也不换国家。
+    assert len(attempts) == 3
+    assert callback.events == [("rearm", "86"), ("rearm", "86")]
+
+
+def test_code_timeout_then_next_number_succeeds(monkeypatch):
+    callback = _CountryTracePhoneCallback()
+    attempts = []
+
+    def _fake_attempt(_page, _phone_callback, **_kwargs):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise br.HeroSmsCodeTimeoutError("act_timeout")
+        return {"page_type": "about_you"}
+
+    monkeypatch.setattr(br, "_do_add_phone_attempt", _fake_attempt)
+    monkeypatch.setattr(br.time, "sleep", lambda *_args: None)
+    result = br._handle_add_phone_challenge(
+        _NavPage([]), callback,
+        device_id="d", user_agent="ua", log=_log, max_phone_attempts=3,
+    )
+
+    assert result == {"page_type": "about_you"}
+    assert len(attempts) == 2
+    assert callback.events == [("rearm", "86")]
 
 
 def test_whatsapp_failure_rotates_country_before_retry(monkeypatch):

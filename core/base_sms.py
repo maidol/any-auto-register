@@ -224,7 +224,9 @@ HERO_SMS_DEFAULT_SERVICE = "dr"
 # 才会被读到，默认关闭，所以这个默认值必须自己是对的。
 HERO_SMS_DEFAULT_COUNTRY = "52"
 HERO_SMS_PHONE_LIFETIME = 20 * 60
-HERO_SMS_CODE_TIMEOUT = 200
+# 每个号码等短信验证码的上限。超时即释放号码，由 _handle_add_phone_challenge 换号重试。
+PHONE_CODE_TIMEOUT = 180
+HERO_SMS_CODE_TIMEOUT = PHONE_CODE_TIMEOUT
 _HERO_SMS_CACHE_LOCK = threading.Lock()
 _HERO_SMS_VERIFY_LOCK = threading.RLock()
 _HERO_SMS_CACHE: dict | None = None
@@ -1402,7 +1404,7 @@ class PhoneCallbackController:
 
         if self.phase == "need_code" and self.activation:
             self.log(f"等待短信验证码... (activation_id={self.activation.activation_id})")
-            code_timeout = 200 if self.provider_key in ("herosms", "herosms_api") else 300
+            code_timeout = PHONE_CODE_TIMEOUT
             try:
                 code = provider.get_code(self.activation.activation_id, timeout=code_timeout)
             except HeroSmsCodeTimeoutError:

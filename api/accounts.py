@@ -9,11 +9,13 @@ from pydantic import BaseModel, Field
 
 from application.account_exports import AccountExportsService, ExportArtifact
 from application.accounts import AccountsService
+from application.sub2api_sync import Sub2ApiSyncService
 from domain.accounts import AccountCreateCommand, AccountExportSelection, AccountQuery, AccountUpdateCommand
 
 router = APIRouter(prefix="/accounts", tags=["accounts"])
 service = AccountsService()
 exports_service = AccountExportsService()
+sub2api_sync_service = Sub2ApiSyncService()
 
 
 class AccountCreateRequest(BaseModel):
@@ -156,6 +158,22 @@ def export_accounts_sub2api(body: BatchExportRequest):
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     return _stream_artifact(artifact)
+
+
+@router.post("/sync/sub2api")
+def sync_accounts_sub2api(body: BatchExportRequest):
+    try:
+        return sub2api_sync_service.sync_selected(
+            AccountExportSelection(
+                platform=body.platform,
+                ids=body.ids,
+                select_all=body.select_all,
+                status_filter=body.status_filter or "",
+                search_filter=body.search_filter or "",
+            )
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.post("/export/cpa")

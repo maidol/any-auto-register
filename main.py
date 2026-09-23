@@ -80,7 +80,11 @@ async def lifespan(app: FastAPI):
     start_async()
     from core.lifecycle import lifecycle_manager
     lifecycle_manager.start()
+    from application.sub2api_sync import sub2api_auto_sync
+    sub2api_auto_sync.start()
     yield
+    from application.sub2api_sync import sub2api_auto_sync as _sub2api_auto_sync
+    _sub2api_auto_sync.stop()
     from core.lifecycle import lifecycle_manager as _lifecycle_manager
     _lifecycle_manager.stop()
     from core.scheduler import scheduler as _scheduler

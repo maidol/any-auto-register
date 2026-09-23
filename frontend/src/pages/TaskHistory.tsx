@@ -4,7 +4,8 @@ import { apiFetch } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { getTaskStatusText, isTerminalTaskStatus, TASK_STATUS_VARIANTS } from '@/lib/tasks'
-import { RefreshCw, Activity, CheckCircle2, AlertTriangle, Clock3, ChevronDown, Ban } from 'lucide-react'
+import { TaskLogPanel } from '@/components/tasks/TaskLogPanel'
+import { RefreshCw, Activity, CheckCircle2, AlertTriangle, Clock3, ChevronDown, Ban, FileText, X } from 'lucide-react'
 
 function shortId(id: string) {
   if (!id) return '-'
@@ -39,6 +40,7 @@ export default function TaskHistory() {
   const [loading, setLoading] = useState(false)
   const [cancellingTaskId, setCancellingTaskId] = useState<string | null>(null)
   const [actionError, setActionError] = useState('')
+  const [logTaskId, setLogTaskId] = useState<string | null>(null)
 
   const load = async () => {
     setLoading(true)
@@ -272,24 +274,33 @@ export default function TaskHistory() {
                       )}
                     </td>
                     <td className="px-4 py-3">
-                      {task.cancellable && !isTerminalTaskStatus(task.status) ? (
+                      <div className="flex items-center gap-2">
                         <Button
                           variant="outline"
                           size="sm"
-                          onClick={() => cancelTask(task)}
-                          disabled={cancellingTaskId !== null || task.status === 'cancel_requested'}
-                          className="whitespace-nowrap text-red-500 hover:text-red-600"
+                          onClick={() => setLogTaskId(task.id)}
+                          className="whitespace-nowrap"
                         >
-                          <Ban className="mr-1 h-3.5 w-3.5" />
-                          {task.status === 'cancel_requested'
-                            ? '取消中'
-                            : cancellingTaskId === task.id
-                              ? '处理中...'
-                              : '终止任务'}
+                          <FileText className="mr-1 h-3.5 w-3.5" />
+                          查看日志
                         </Button>
-                      ) : (
-                        <span className="text-xs text-[var(--text-muted)]">-</span>
-                      )}
+                        {task.cancellable && !isTerminalTaskStatus(task.status) ? (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => cancelTask(task)}
+                            disabled={cancellingTaskId !== null || task.status === 'cancel_requested'}
+                            className="whitespace-nowrap text-red-500 hover:text-red-600"
+                          >
+                            <Ban className="mr-1 h-3.5 w-3.5" />
+                            {task.status === 'cancel_requested'
+                              ? '取消中'
+                              : cancellingTaskId === task.id
+                                ? '处理中...'
+                                : '终止任务'}
+                          </Button>
+                        ) : null}
+                      </div>
                     </td>
                   </tr>
                 )
@@ -298,6 +309,32 @@ export default function TaskHistory() {
           </table>
         </div>
       </div>
+
+      {logTaskId && (
+        <div className="dialog-backdrop" onClick={() => setLogTaskId(null)}>
+          <div
+            className="dialog-panel flex w-[min(960px,calc(100vw-32px))] max-w-none flex-col overflow-hidden"
+            onClick={e => e.stopPropagation()}
+            style={{ maxHeight: '90vh' }}
+          >
+            <div className="flex items-center justify-between border-b border-[var(--border)] px-6 py-4">
+              <h2 className="text-base font-semibold text-[var(--text-primary)]">任务日志</h2>
+              <button onClick={() => setLogTaskId(null)} className="text-[var(--text-muted)] hover:text-[var(--text-primary)]">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-6 py-5">
+              <TaskLogPanel key={logTaskId} taskId={logTaskId} onDone={() => load()} />
+            </div>
+            <div className="flex items-center justify-between border-t border-[var(--border)] px-6 py-3 text-xs text-[var(--text-muted)]">
+              <span>任务 ID: {logTaskId}</span>
+              <Button variant="outline" size="sm" onClick={() => setLogTaskId(null)}>
+                关闭
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -177,11 +177,13 @@ function RegisterModal({
   platformMeta,
   onClose,
   onDone,
+  onTaskCreated,
 }: {
   platform: string
   platformMeta: any
   onClose: () => void
   onDone: () => void
+  onTaskCreated: (taskId: string) => void
 }) {
   const [config, setConfig] = useState<any | null>(null)
   const [configOptions, setConfigOptions] = useState<ConfigOptionsResponse>({
@@ -349,6 +351,7 @@ function RegisterModal({
         }),
       })
       setTaskId(res.task_id)
+      onTaskCreated(res.task_id)
     } finally { setStarting(false) }
   }
 
@@ -1557,6 +1560,8 @@ export default function Accounts() {
   const [batchRefreshing, setBatchRefreshing] = useState(false)
   const [batchTask, setBatchTask] = useState<{ taskId: string; title: string } | null>(null)
   const [batchTaskStatus, setBatchTaskStatus] = useState<string | null>(null)
+  const [lastRegisterTaskId, setLastRegisterTaskId] = useState<string | null>(null)
+  const [sub2apiSyncing, setSub2apiSyncing] = useState(false)
 
   useEffect(() => {
     getPlatforms().then((list: any[]) => {
@@ -1655,7 +1660,7 @@ export default function Accounts() {
       {detail && <DetailModal acc={detail} onClose={() => setDetail(null)} onSave={() => { setDetail(null); load() }} />}
       {showImport && <ImportModal platform={tab} onClose={() => setShowImport(false)} onDone={() => { setShowImport(false); load() }} />}
       {showAdd && <AddModal platform={tab} onClose={() => setShowAdd(false)} onDone={() => { setShowAdd(false); load() }} />}
-      {showRegister && <RegisterModal platform={tab} platformMeta={platformsMap[tab]} onClose={() => setShowRegister(false)} onDone={() => load()} />}
+      {showRegister && <RegisterModal platform={tab} platformMeta={platformsMap[tab]} onClose={() => setShowRegister(false)} onDone={() => load()} onTaskCreated={setLastRegisterTaskId} />}
       {actionResult && <ActionResultModal title={actionResult.title} payload={actionResult.payload} onClose={() => setActionResult(null)} />}
       {batchTask && (
         <ActionTaskModal
@@ -1697,6 +1702,16 @@ export default function Accounts() {
               <Plus className="mr-1.5 h-3.5 w-3.5" />
               自动注册
             </Button>
+            {lastRegisterTaskId && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setBatchTask({ taskId: lastRegisterTaskId, title: '自动注册日志' })}
+                className="h-8 bg-transparent"
+              >
+                注册日志
+              </Button>
+            )}
             <div className="h-4 w-[1px] bg-[var(--border)]"></div>
             <Button size="sm" variant="outline" onClick={() => setShowImport(true)} className="h-8 bg-transparent">
               <Upload className="mr-1.5 h-3.5 w-3.5" />
@@ -1782,6 +1797,33 @@ export default function Accounts() {
             <Button variant="ghost" size="sm" onClick={() => load()} disabled={loading} className="h-7 w-7 p-0 text-[var(--text-muted)] hover:text-[var(--text-primary)]">
               <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
             </Button>
+            {selectedCount > 0 && tab === 'chatgpt' && (
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={sub2apiSyncing}
+                className="h-7 px-2.5"
+                onClick={async () => {
+                  if (!confirm(`确认把选中的 ${selectedCount} 个账号导入 Sub2API？已导入过的会自动跳过。`)) return
+                  setSub2apiSyncing(true)
+                  try {
+                    const result = await apiFetch('/accounts/sync/sub2api', {
+                      method: 'POST',
+                      body: JSON.stringify({ platform: tab, ids: [...selectedIds] }),
+                    })
+                    setActionResult({ title: '导入 Sub2API 结果', payload: result })
+                    load()
+                  } catch (e: any) {
+                    window.alert(e?.message || '导入 Sub2API 失败')
+                  } finally {
+                    setSub2apiSyncing(false)
+                  }
+                }}
+              >
+                <Upload className="mr-1.5 h-3.5 w-3.5" />
+                {sub2apiSyncing ? '导入中...' : '导入 Sub2API'}
+              </Button>
+            )}
             {selectedCount > 0 && (
               <Button
                 size="sm"

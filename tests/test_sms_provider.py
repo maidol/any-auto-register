@@ -196,7 +196,7 @@ class TestCreatePhoneCallbacks:
         assert any("等待短信验证码" in item for item in logs)
         assert any("短信验证成功" in item for item in logs)
 
-    def test_phone_callback_uses_200_seconds_only_for_herosms(self, monkeypatch):
+    def test_phone_callback_waits_180_seconds_for_herosms(self, monkeypatch):
         events = []
 
         class FakeProvider:
@@ -219,10 +219,10 @@ class TestCreatePhoneCallbacks:
 
         assert callback() == "+15550009999"
         assert callback() == "123456"
-        assert events == [("get_code", "act_timeout", 200)]
+        assert events == [("get_code", "act_timeout", 180)]
         cleanup()
 
-    def test_phone_callback_keeps_300_seconds_for_non_herosms(self, monkeypatch):
+    def test_phone_callback_waits_180_seconds_for_non_herosms(self, monkeypatch):
         events = []
 
         class FakeProvider:
@@ -245,7 +245,7 @@ class TestCreatePhoneCallbacks:
 
         assert callback() == "+15550009999"
         assert callback() == "123456"
-        assert events == [("get_code", "act_timeout", 300)]
+        assert events == [("get_code", "act_timeout", 180)]
         cleanup()
 
     def test_herosms_timeout_raises_and_cancels_without_resend(self, monkeypatch, tmp_path):

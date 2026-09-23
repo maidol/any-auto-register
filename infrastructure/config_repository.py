@@ -12,6 +12,7 @@ class ConfigRepository:
         "cpa_api_url", "cpa_api_key",
         "team_manager_url", "team_manager_key",
         "any2api_url", "any2api_password",
+        "sub2api_url", "sub2api_admin_key", "sub2api_auto_sync", "sub2api_sync_interval_minutes",
     }
 
     def __init__(self, definitions: ProviderDefinitionsRepository | None = None):
