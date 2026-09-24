@@ -2008,7 +2008,17 @@ def _submit_login_email_via_page(page, email: str, log) -> dict:
     return {"ok": False, "status": 0, "url": last_url, "data": None, "text": "OAuth 邮箱页提交后未跳转"}
 
 
-def _do_codex_oauth(page, cookies_dict: dict, email: str, password: str, otp_callback, phone_callback, proxy: str | None, log) -> dict | None:
+def _do_codex_oauth(
+    page,
+    cookies_dict: dict,
+    email: str,
+    password: str,
+    otp_callback,
+    phone_callback,
+    proxy: str | None,
+    log,
+    max_phone_attempts: int = 3,
+) -> dict | None:
     """在真实浏览器会话内完成 Codex OAuth，返回完整 token 包。"""
     from .oauth import generate_oauth_url
     from .constants import CODEX_CLIENT_ID, CODEX_REDIRECT_URI, CODEX_SCOPE
@@ -2125,6 +2135,7 @@ def _do_codex_oauth(page, cookies_dict: dict, email: str, password: str, otp_cal
                             page, phone_callback,
                             device_id=device_id, user_agent=user_agent,
                             log=log, resume_url=oauth_start.auth_url,
+                            max_phone_attempts=max_phone_attempts,
                         )
                         continue
                     except Exception as exc:
@@ -4059,7 +4070,15 @@ def _submit_about_you_via_page(page, log) -> dict:
     return {"ok": False, "status": 0, "url": last_url, "data": None, "text": "about_you 提交后未跳转"}
 
 
-def _browser_registration_flow(page, email: str, password: str, otp_callback, phone_callback, log) -> dict:
+def _browser_registration_flow(
+    page,
+    email: str,
+    password: str,
+    otp_callback,
+    phone_callback,
+    log,
+    max_phone_attempts: int = 3,
+) -> dict:
     device_id = str(uuid.uuid4())
     try:
         user_agent = str(page.evaluate("() => navigator.userAgent") or "").strip() or _random_chrome_ua()
@@ -4197,6 +4216,7 @@ def _browser_registration_flow(page, email: str, password: str, otp_callback, ph
                     user_agent=user_agent,
                     log=log,
                     resume_url=f"{CHATGPT_APP}/",
+                    max_phone_attempts=max_phone_attempts,
                 )
             continue
 
@@ -4211,6 +4231,7 @@ def _browser_registration_flow(page, email: str, password: str, otp_callback, ph
                 user_agent=user_agent,
                 log=log,
                 resume_url=f"{CHATGPT_APP}/",
+                max_phone_attempts=max_phone_attempts,
             )
             continue
 
@@ -4236,12 +4257,14 @@ class ChatGPTBrowserRegister:
         otp_callback: Optional[Callable[[], str]] = None,
         phone_callback: Optional[Callable[[], str]] = None,
         log_fn: Callable[[str], None] = print,
+        max_phone_attempts: int = 3,
     ):
         self.headless = headless
         self.proxy = proxy
         self.otp_callback = otp_callback
         self.phone_callback = phone_callback
         self.log = log_fn
+        self.max_phone_attempts = max(1, int(max_phone_attempts))
 
     def run(self, email: str, password: str, resume_stage: str = "") -> dict:
         account_created = resume_stage in RegistrationAttemptError.RESUMABLE_STAGES
@@ -4268,6 +4291,7 @@ class ChatGPTBrowserRegister:
                         self.otp_callback,
                         self.phone_callback,
                         self.log,
+                        self.max_phone_attempts,
                     )
                 except Exception as exc:
                     raise RegistrationAttemptError(
@@ -4321,6 +4345,7 @@ class ChatGPTBrowserRegister:
                 result = _do_codex_oauth(
                     page, {}, email, password,
                     self.otp_callback, self.phone_callback, self.proxy, self.log,
+                    self.max_phone_attempts,
                 )
                 return result
         except Exception as e:

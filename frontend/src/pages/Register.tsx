@@ -19,6 +19,7 @@ const DEFAULT_FORM: Record<string, any> = {
   retry_count: 0,
   retry_interval_seconds: 0,
   account_interval_seconds: 0,
+  phone_retry_count: 2,
   proxy: '',
   executor_type: '',
   captcha_solver: 'auto',
@@ -273,6 +274,7 @@ export default function Register() {
         retry_count: form.retry_count,
         retry_interval_seconds: form.retry_interval_seconds,
         account_interval_seconds: form.account_interval_seconds,
+        phone_retry_count: form.phone_retry_count,
         proxy: form.proxy || null,
         executor_type: form.executor_type,
         captcha_solver: 'auto',
@@ -321,7 +323,7 @@ export default function Register() {
     return () => window.clearInterval(interval)
   }, [applyTerminalTask, task?.task_id, task?.status])
 
-  const Input = ({ label, k, type = 'text', placeholder = '' }: any) => (
+  const Input = ({ label, k, type = 'text', placeholder = '', min, max }: any) => (
     <div>
       <label className="block text-xs text-[var(--text-muted)] mb-1">{label}</label>
       <input
@@ -329,6 +331,8 @@ export default function Register() {
         value={(form as any)[k]}
         onChange={e => set(k, type === 'number' ? Number(e.target.value) : e.target.value)}
         placeholder={placeholder}
+        min={min}
+        max={max}
         className="control-surface"
       />
     </div>
@@ -379,10 +383,11 @@ export default function Register() {
                 <Input label="批量数量" k="count" type="number" />
                 <Input label="代理 (可选)" k="proxy" placeholder="http://user:pass@host:port" />
               </div>
-              <div className="grid gap-4 md:grid-cols-3">
+              <div className="grid gap-4 md:grid-cols-4">
                 <Input label="失败重试次数" k="retry_count" type="number" />
                 <Input label="重试间隔 (秒)" k="retry_interval_seconds" type="number" />
                 <Input label="账号间隔 (秒)" k="account_interval_seconds" type="number" />
+                <Input label="换号重试次数" k="phone_retry_count" type="number" min={0} max={10} />
               </div>
             </CardContent>
           </Card>

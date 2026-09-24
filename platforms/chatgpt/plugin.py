@@ -166,6 +166,7 @@ class ChatGPTPlatform(BasePlatform):
                 otp_callback=artifacts.otp_callback,
                 phone_callback=artifacts.phone_callback,
                 log_fn=ctx.log,
+                max_phone_attempts=max(1, 1 + int(ctx.extra.get("phone_retry_count", 2))),
             ),
             browser_register_runner=lambda worker, ctx, artifacts: worker.run(
                 email=ctx.identity.email or "",

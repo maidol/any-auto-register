@@ -7,6 +7,7 @@ WhatsApp 和 Text 两个渠道，**默认选中 WhatsApp**。租来的是纯 SMS
 这些测试全部用假 page，不需要浏览器。
 """
 import re
+from types import SimpleNamespace
 
 import pytest
 
@@ -584,6 +585,46 @@ def test_code_timeout_then_next_number_succeeds(monkeypatch):
     assert callback.events == [("rearm", "86")]
 
 
+def test_code_timeout_with_zero_retry_terminates_immediately_without_rearm(monkeypatch):
+    callback = _CountryTracePhoneCallback()
+    attempts = []
+
+    def _fake_attempt(_page, _phone_callback, **_kwargs):
+        attempts.append(1)
+        raise br.HeroSmsCodeTimeoutError("act_timeout_1")
+
+    monkeypatch.setattr(br, "_do_add_phone_attempt", _fake_attempt)
+    monkeypatch.setattr(br.time, "sleep", lambda *_args: None)
+    with pytest.raises(br.HeroSmsCodeTimeoutError, match="act_timeout_1"):
+        br._handle_add_phone_challenge(
+            _NavPage([]), callback,
+            device_id="d", user_agent="ua", log=_log, max_phone_attempts=1,
+        )
+
+    assert len(attempts) == 1
+    assert callback.events == []
+
+
+def test_code_timeout_with_one_retry_attempts_two_numbers(monkeypatch):
+    callback = _CountryTracePhoneCallback()
+    attempts = []
+
+    def _fake_attempt(_page, _phone_callback, **_kwargs):
+        attempts.append(1)
+        raise br.HeroSmsCodeTimeoutError(f"act_timeout_{len(attempts)}")
+
+    monkeypatch.setattr(br, "_do_add_phone_attempt", _fake_attempt)
+    monkeypatch.setattr(br.time, "sleep", lambda *_args: None)
+    with pytest.raises(br.HeroSmsCodeTimeoutError, match="act_timeout_2"):
+        br._handle_add_phone_challenge(
+            _NavPage([]), callback,
+            device_id="d", user_agent="ua", log=_log, max_phone_attempts=2,
+        )
+
+    assert len(attempts) == 2
+    assert callback.events == [("rearm", "86")]
+
+
 def test_whatsapp_failure_rotates_country_before_retry(monkeypatch):
     page = FakePage([], cookies=_session_cookie(
         {"phone_verification_channel": "whatsapp"}
@@ -710,3 +751,18 @@ def test_server_side_whatsapp_verdict_triggers_number_rotation(monkeypatch):
     assert [event for event in callback.events if event[0] == "number"] == [
         ("number", "86"), ("number", "66"), ("number", "7")
     ]
+
+
+def test_chatgpt_adapter_respects_phone_retry_count_from_extra():
+    from platforms.chatgpt.plugin import ChatGPTPlatform
+
+    ctx = SimpleNamespace(
+        executor_type="browser",
+        proxy=None,
+        extra={"phone_retry_count": 0},
+        log=lambda *_args, **_kwargs: None,
+    )
+    artifacts = SimpleNamespace(otp_callback=None, phone_callback=None)
+    worker = ChatGPTPlatform().build_browser_registration_adapter().browser_worker_builder(ctx, artifacts)
+
+    assert worker.max_phone_attempts == 1

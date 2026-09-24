@@ -503,6 +503,10 @@ def _build_platform_instance(platform_name: str, payload: dict[str, Any], logger
     executor_type = str(payload.get("executor_type", "protocol") or "protocol")
     captcha_solver = str(payload.get("captcha_solver", "auto") or "auto")
     extra = dict(payload.get("extra") or {})
+    if "phone_retry_count" in payload:
+        extra["phone_retry_count"] = payload["phone_retry_count"]
+    elif "phone_retry_count" not in extra:
+        extra["phone_retry_count"] = 2
     config = RegisterConfig(
         executor_type=executor_type,
         captcha_solver=captcha_solver,

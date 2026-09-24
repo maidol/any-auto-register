@@ -37,6 +37,7 @@ class RegisterTaskRequest(BaseModel):
     retry_count: int = 0
     retry_interval_seconds: float = 0.0
     account_interval_seconds: float = 0.0
+    phone_retry_count: int = Field(default=2, ge=0, le=10)
     proxy_strategy: str = "round_robin"
     clean_browser_context: bool = True
     require_proxy: bool = False

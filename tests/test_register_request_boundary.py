@@ -44,6 +44,7 @@ FRONTEND_BODY = {
     "retry_count": 2,
     "retry_interval_seconds": 15,
     "account_interval_seconds": 10,
+    "phone_retry_count": 2,
     "proxy_strategy": "round_robin",
     "clean_browser_context": True,
     "require_proxy": False,
@@ -53,6 +54,7 @@ STRATEGY_KEYS = (
     "retry_count",
     "retry_interval_seconds",
     "account_interval_seconds",
+    "phone_retry_count",
     "proxy_strategy",
     "clean_browser_context",
     "require_proxy",
@@ -132,6 +134,23 @@ def test_large_intervals_survive_http_boundary_unchanged():
 
     assert strategy.retry_interval_seconds == 3601.0
     assert strategy.account_interval_seconds == 999999.0
+
+
+def test_phone_retry_count_survives_model_dump_and_defaults_to_two():
+    dumped = RegisterTaskRequest(**FRONTEND_BODY).model_dump()
+    assert dumped.get("phone_retry_count") == 2
+
+    # 省略时默认 2
+    body_without = {k: v for k, v in FRONTEND_BODY.items() if k != "phone_retry_count"}
+    dumped_without = RegisterTaskRequest(**body_without).model_dump()
+    assert dumped_without.get("phone_retry_count") == 2
+
+
+def test_phone_retry_count_rejects_out_of_range():
+    with pytest.raises(Exception):
+        RegisterTaskRequest(**dict(FRONTEND_BODY, phone_retry_count=-1))
+    with pytest.raises(Exception):
+        RegisterTaskRequest(**dict(FRONTEND_BODY, phone_retry_count=11))
 
 
 # --- customer_portal_api 的两份同名模型：AST 平价检查 -----------------------

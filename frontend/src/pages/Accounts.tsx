@@ -202,6 +202,7 @@ function RegisterModal({
   const [retryCount, setRetryCount] = useState(0)
   const [retryInterval, setRetryInterval] = useState(0)
   const [accountInterval, setAccountInterval] = useState(0)
+  const [phoneRetryCount, setPhoneRetryCount] = useState(2)
   const [selection, setSelection] = useState({
     identityProvider: '',
     oauthProvider: '',
@@ -344,6 +345,7 @@ function RegisterModal({
           retry_count: retryCount,
           retry_interval_seconds: retryInterval,
           account_interval_seconds: accountInterval,
+          phone_retry_count: phoneRetryCount,
           executor_type: selection.executorType,
           captcha_solver: 'auto',
           proxy: null,
@@ -454,7 +456,7 @@ function RegisterModal({
                   </div>
                 </div>
 
-                <div className="grid grid-cols-3 gap-3">
+                <div className="grid grid-cols-4 gap-3">
                   <div>
                     <label className="text-xs text-[var(--text-muted)] block mb-1">失败重试次数</label>
                     <input type="number" min={0} max={10} value={retryCount}
@@ -471,6 +473,12 @@ function RegisterModal({
                     <label className="text-xs text-[var(--text-muted)] block mb-1">账号间隔(秒)</label>
                     <input type="number" min={0} value={accountInterval}
                       onChange={e => setAccountInterval(Number(e.target.value))}
+                      className="control-surface control-surface-compact text-center" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-[var(--text-muted)] block mb-1">换号重试次数</label>
+                    <input type="number" min={0} max={10} value={phoneRetryCount}
+                      onChange={e => setPhoneRetryCount(Number(e.target.value))}
                       className="control-surface control-surface-compact text-center" />
                   </div>
                 </div>
