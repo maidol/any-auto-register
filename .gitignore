@@ -62,6 +62,9 @@ docs/
 *.swp
 .ace-tool/
 
+# Git worktrees
+.worktrees/
+
 # AI 工具 & 设计文档
 AGENTS.md
 .claude/
