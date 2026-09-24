@@ -22,7 +22,7 @@ class KiroProtocolMailboxWorker:
         otp_callback=None,
     ) -> dict:
         use_password = password or _pwd()
-        self.client.log(f"  自动生成密码: {use_password}" if not password else f"  使用传入密码: {use_password}")
+        self.client.log("  密码已准备（自动生成）" if not password else "  已使用传入密码")
         self.client.log(f"========== 开始注册: {email} ==========")
 
         redir = self.client.step1_kiro_init()

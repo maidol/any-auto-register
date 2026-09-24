@@ -18,6 +18,10 @@ from rich.text import Text
 from rich.align import Align
 from rich import box
 
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+from core.log_sanitizer import SensitiveDataFilter
 
 
 COLORS = {
@@ -56,6 +60,7 @@ logging.setLoggerClass(CustomLogger)
 logger: CustomLogger = logging.getLogger("TurnstileAPIServer")  # type: ignore
 logger.setLevel(logging.DEBUG)
 handler = logging.StreamHandler(sys.stdout)
+handler.addFilter(SensitiveDataFilter())
 logger.addHandler(handler)
 
 
@@ -865,7 +870,7 @@ class TurnstileAPIServer:
                             token = await locator.input_value(timeout=500)
                             if token:
                                 elapsed_time = round(time.time() - start_time, 3)
-                                logger.success(f"Browser {index}: Successfully solved captcha - {COLORS.get('MAGENTA')}{token[:10]}{COLORS.get('RESET')} in {COLORS.get('GREEN')}{elapsed_time}{COLORS.get('RESET')} Seconds")
+                                logger.success(f"Browser {index}: Successfully solved captcha in {COLORS.get('GREEN')}{elapsed_time}{COLORS.get('RESET')} Seconds")
                                 await save_result(task_id, "turnstile", {"value": token, "elapsed_time": elapsed_time})
                                 return
                         except Exception as e:
@@ -881,7 +886,7 @@ class TurnstileAPIServer:
                                 element_token = await locator.nth(i).input_value(timeout=500)
                                 if element_token:
                                     elapsed_time = round(time.time() - start_time, 3)
-                                    logger.success(f"Browser {index}: Successfully solved captcha - {COLORS.get('MAGENTA')}{element_token[:10]}{COLORS.get('RESET')} in {COLORS.get('GREEN')}{elapsed_time}{COLORS.get('RESET')} Seconds")
+                                    logger.success(f"Browser {index}: Successfully solved captcha in {COLORS.get('GREEN')}{elapsed_time}{COLORS.get('RESET')} Seconds")
                                     await save_result(task_id, "turnstile", {"value": element_token, "elapsed_time": elapsed_time})
                                     return
                             except Exception as e:

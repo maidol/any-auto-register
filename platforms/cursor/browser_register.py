@@ -397,7 +397,7 @@ def _handle_turnstile(page, log_fn=print, solve_fn=None, wait_secs: int = 12) ->
         if solve_fn:
             token = solve_fn(page.url, _get_turnstile_sitekey(page))
             if token:
-                log_fn(f"注入 Turnstile token ({token[:40]}...)")
+                log_fn("已注入 Turnstile token")
                 _inject_turnstile(page, token)
                 time.sleep(2)
                 _click_continue(page)
@@ -450,7 +450,7 @@ class CursorBrowserRegister:
             self.log(f"调用 Captcha Solver 解题 ({sitekey[:20]}...)...")
             token = self.captcha.solve_turnstile(url, sitekey or TURNSTILE_SITEKEY)
             if token:
-                self.log(f"✅ Solver 返回 token: {token[:50]}...")
+                self.log("✅ Solver 已返回 Turnstile token")
             return token
         except Exception as e:
             self.log(f"⚠️ Captcha Solver 失败: {e}")
@@ -580,7 +580,7 @@ class CursorBrowserRegister:
                 if not solved:
                     token = self._solve_turnstile(page.url, _get_turnstile_sitekey(page))
                     if token:
-                        self.log(f"注入 Turnstile token ({token[:40]}...)")
+                        self.log("已注入 Turnstile token")
                         _inject_turnstile(page, token)
                         time.sleep(2)
                         _click_continue(page)
@@ -653,7 +653,7 @@ class CursorBrowserRegister:
                             )
                             sms_code = self.phone_callback()  # 复用 callback 获取短信码
                             if sms_code:
-                                self.log(f"填写短信验证码: {sms_code}")
+                                self.log("短信验证码已获取")
                                 for digit in str(sms_code).strip():
                                     page.keyboard.press(digit)
                                     time.sleep(0.1)
@@ -710,7 +710,7 @@ class CursorBrowserRegister:
             otp = self.otp_callback()
             if not otp:
                 raise RuntimeError("未获取到验证码")
-            self.log(f"验证码: {otp}")
+            self.log("验证码已获取")
 
             # WorkOS 6格子 OTP：点击第一个格子然后逐键输入
             try:

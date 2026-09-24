@@ -412,7 +412,7 @@ def _handle_turnstile(
     if not solved and provided_token:
         token = str(provided_token or "").strip()
         if token:
-            log_fn(f"注入 Windsurf Turnstile token ({token[:40]}...)")
+            log_fn("已注入 Windsurf Turnstile token")
             _inject_turnstile(page, token)
             time.sleep(2)
             _click_start_trial(page, log_fn)
@@ -669,7 +669,7 @@ class WindsurfBrowserRegister:
 
         raw_code = self.otp_callback()
         code = self._extract_code(raw_code)
-        self.log(f"获取 Windsurf 验证码: {code}")
+        self.log("Windsurf 验证码已获取")
 
         complete_data: dict = {}
         auth_data: dict[str, str] = {}

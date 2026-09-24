@@ -31,7 +31,7 @@ class CursorProtocolMailboxWorker:
         otp = otp_callback() if otp_callback else input("OTP: ")
         if not otp:
             raise RuntimeError("未获取到验证码")
-        self.log(f"验证码: {otp}")
+        self.log("验证码已获取")
         self.log("Step4: 提交 OTP...")
         auth_code = self.client.step4_submit_otp(otp, email, state_encoded)
         self.log("Step5: 获取 Token...")

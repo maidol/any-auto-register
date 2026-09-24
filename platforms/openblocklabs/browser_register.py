@@ -486,7 +486,7 @@ class OpenBlockLabsBrowserRegister:
         if not password:
             password = _generate_password()
             self.log("未提供密码，已自动生成随机密码")
-        self.log(f"注册凭据: {email} / {password}")
+        self.log("注册凭据已准备")
 
         proxy = _build_proxy_config(self.proxy)
         launch_opts = {"headless": self.headless}

@@ -69,7 +69,7 @@ class GrokRegister:
             from core.base_captcha import YesCaptcha
             solver = YesCaptcha(self.key)
         token = solver.solve_turnstile('https://accounts.x.ai/sign-up', TURNSTILE_SITEKEY)
-        self.log(f"  Turnstile: {token[:40]}...")
+        self.log("  Turnstile token 已获取")
         return token
 
     def step1_send_otp(self, email: str):
@@ -79,7 +79,7 @@ class GrokRegister:
         self.log("  验证码已发送")
 
     def step2_verify_otp(self, email: str, code: str) -> bool:
-        self.log(f"Step2: 验证码校验 {code}...")
+        self.log("Step2: 验证码校验")
         body = _pb_string(1, email) + _pb_string(2, code)
         resp = self._grpc_post('/auth_mgmt.AuthManagement/VerifyEmailValidationCode', body)
         ok = b'grpc-status:0' in resp

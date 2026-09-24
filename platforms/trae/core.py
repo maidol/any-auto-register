@@ -44,7 +44,7 @@ class TraeRegister:
         self.log("验证码已发送，等待邮件...")
 
     def step3_register(self, email: str, password: str, otp: str):
-        self.log(f"提交注册... otp={otp}")
+        self.log("提交注册... 验证码已准备")
         r = self.ex.post(f"{BASE_URL}/passport/web/email/register_verify_login/",
                          params=_base_params(),
                          data={"type": "1", "email": email, "password": password,

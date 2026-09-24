@@ -7,6 +7,8 @@ import threading
 import signal
 import requests
 
+from core.log_sanitizer import safe_print
+
 SOLVER_PORT = 8889
 SOLVER_URL = f"http://localhost:{SOLVER_PORT}"
 _proc: subprocess.Popen = None
@@ -47,26 +49,26 @@ def _ensure_camoufox_browser() -> bool:
     try:
         from camoufox.pkgman import installed_verstr, CamoufoxNotInstalled
     except Exception as e:
-        print(f"[Solver] camoufox 库导入失败: {e}")
+        safe_print(f"[Solver] camoufox 库导入失败: {e}")
         return False
 
     try:
         ver = installed_verstr()
-        print(f"[Solver] Camoufox 浏览器已就绪 (v{ver})")
+        safe_print(f"[Solver] Camoufox 浏览器已就绪 (v{ver})")
         return True
     except CamoufoxNotInstalled:
         pass
     except Exception as e:
-        print(f"[Solver] Camoufox 浏览器检测异常，仍尝试安装: {e}")
+        safe_print(f"[Solver] Camoufox 浏览器检测异常，仍尝试安装: {e}")
 
-    print("[Solver] Camoufox 浏览器未安装，开始下载（约 100MB，请耐心等待）...")
+    safe_print("[Solver] Camoufox 浏览器未安装，开始下载（约 100MB，请耐心等待）...")
     try:
         from camoufox.pkgman import CamoufoxFetcher
         CamoufoxFetcher().install()
-        print("[Solver] Camoufox 浏览器下载完成")
+        safe_print("[Solver] Camoufox 浏览器下载完成")
         return True
     except Exception as e:
-        print(f"[Solver] Camoufox 浏览器下载失败: {e}")
+        safe_print(f"[Solver] Camoufox 浏览器下载失败: {e}")
         return False
 
 
@@ -74,21 +76,21 @@ def start():
     global _proc, _consecutive_failures, _last_failure_reason
     with _lock:
         if is_running():
-            print("[Solver] 已在运行")
+            safe_print("[Solver] 已在运行")
             _consecutive_failures = 0
             _last_failure_reason = ""
             return
 
         # 连续失败过多，拒绝再试（手动 restart 会重置计数器）
         if _consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
-            print(f"[Solver] 连续 {_consecutive_failures} 次启动失败，停止重试。请手动排查后重启。")
+            safe_print(f"[Solver] 连续 {_consecutive_failures} 次启动失败，停止重试。请手动排查后重启。")
             return
 
         # 启动 Solver 子进程之前先确保 Camoufox 浏览器二进制可用
         if not _ensure_camoufox_browser():
             _consecutive_failures += 1
             _last_failure_reason = "Camoufox 浏览器不可用"
-            print("[Solver] 由于 Camoufox 浏览器不可用，跳过 Solver 启动")
+            safe_print("[Solver] 由于 Camoufox 浏览器不可用，跳过 Solver 启动")
             return
 
         # PyInstaller 打包后 sys.executable 指向 backend 可执行文件，
@@ -124,13 +126,13 @@ def start():
                     pass
                 _consecutive_failures += 1
                 _last_failure_reason = stderr_msg or f"进程退出 code={_proc.returncode}"
-                print(f"[Solver] 子进程异常退出 code={_proc.returncode} (连续失败 {_consecutive_failures}/{_MAX_CONSECUTIVE_FAILURES})")
+                safe_print(f"[Solver] 子进程异常退出 code={_proc.returncode} (连续失败 {_consecutive_failures}/{_MAX_CONSECUTIVE_FAILURES})")
                 if stderr_msg:
-                    print(f"[Solver] stderr: {stderr_msg}")
+                    safe_print(f"[Solver] stderr: {stderr_msg}")
                 _proc = None
                 return
             if is_running():
-                print(f"[Solver] 已启动 PID={_proc.pid}")
+                safe_print(f"[Solver] 已启动 PID={_proc.pid}")
                 _consecutive_failures = 0
                 _last_failure_reason = ""
                 # 关闭 stderr pipe 避免缓冲区满导致子进程阻塞
@@ -151,7 +153,7 @@ def start():
             except Exception:
                 pass
         _last_failure_reason = f"启动超时 {stderr_msg}".strip()
-        print(f"[Solver] 启动超时 (连续失败 {_consecutive_failures}/{_MAX_CONSECUTIVE_FAILURES})"
+        safe_print(f"[Solver] 启动超时 (连续失败 {_consecutive_failures}/{_MAX_CONSECUTIVE_FAILURES})"
               f"{' stderr: ' + stderr_msg if stderr_msg else ''}")
 
 
@@ -166,7 +168,7 @@ def stop():
             except subprocess.TimeoutExpired:
                 _proc.kill()
                 _proc.wait(timeout=3)
-            print("[Solver] 子进程已停止")
+            safe_print("[Solver] 子进程已停止")
         _proc = None
 
         # 2. 即使 _proc 为空（Docker / 外部启动），也尝试通过端口查找残留进程并杀掉
@@ -177,9 +179,9 @@ def stop():
                 if not is_running():
                     break
             if is_running():
-                print("[Solver] 警告: 停止后端口仍被占用")
+                safe_print("[Solver] 警告: 停止后端口仍被占用")
             else:
-                print("[Solver] 残留进程已清理")
+                safe_print("[Solver] 残留进程已清理")
 
 
 def _kill_by_port(port: int):

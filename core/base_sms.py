@@ -1416,7 +1416,7 @@ class PhoneCallbackController:
                     self._verify_lock_acquired = False
                 raise
             if code:
-                self.log(f"收到验证码: {code}")
+                self.log("验证码已获取")
                 if getattr(provider, "auto_report_success_on_code", True):
                     self.report_success()
                 else:

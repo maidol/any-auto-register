@@ -35,7 +35,7 @@ class BlinkProtocolMailboxWorker:
 
         # otp_callback 可能返回完整 URL 或纯 token
         token = self._extract_token(raw)
-        self.log(f"magic_token={token[:16]}...")
+        self.log("magic_token 已获取")
 
         # Step 3: 兑换 customToken
         auth_data = self.client.step2_redeem_magic_link(token, email)

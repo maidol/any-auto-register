@@ -18,6 +18,7 @@ from core.account_graph import (
 from core.base_platform import AccountStatus, RegisterConfig
 from core.datetime_utils import format_local_clock, serialize_datetime
 from core.db import AccountModel, TaskEventModel, TaskLog, TaskModel, engine, save_account, save_failed_account
+from core.log_sanitizer import sanitize_text, sanitize_value
 from core.platform_accounts import build_platform_account
 from core.registry import get
 from infrastructure.platform_runtime import PlatformRuntime
@@ -101,10 +102,10 @@ def _save_task_log(platform: str, email: str, status: str, error: str = "", deta
     with Session(engine) as session:
         log = TaskLog(
             platform=platform,
-            email=email,
+            email=sanitize_text(email),
             status=status,
-            error=error,
-            detail_json=_dump_json(detail or {}),
+            error=sanitize_text(error),
+            detail_json=_dump_json(sanitize_value(detail or {})),
         )
         session.add(log)
         session.commit()
@@ -278,13 +279,15 @@ def list_task_events(task_id: str, *, since: int = 0, limit: int = 200) -> list[
 
 
 def append_task_event(task_id: str, message: str, *, event_type: str = "log", level: str = "info", detail: dict | None = None) -> dict[str, Any]:
+    safe_message = sanitize_text(message)
+    safe_detail = sanitize_value(detail or {})
     with Session(engine) as session:
         event = TaskEventModel(
             task_id=task_id,
             type=event_type,
             level=level,
-            message=message,
-            detail_json=_dump_json(detail or {}),
+            message=safe_message,
+            detail_json=_dump_json(safe_detail),
         )
         session.add(event)
         session.commit()
@@ -372,14 +375,16 @@ class TaskLogger:
         self.task_id = task_id
 
     def log(self, message: str, *, level: str = "info", event_type: str = "log", detail: dict | None = None) -> None:
+        safe_message = sanitize_text(message)
+        safe_detail = sanitize_value(detail) if detail is not None else None
         append_task_event(
             self.task_id,
-            message,
+            safe_message,
             event_type=event_type,
             level=level,
-            detail=detail,
+            detail=safe_detail,
         )
-        print(f"[task:{self.task_id}] {message}")
+        print(f"[task:{self.task_id}] {safe_message}")
 
     def mark_running(self) -> None:
         def _update(task: TaskModel) -> None:
@@ -411,11 +416,13 @@ class TaskLogger:
         _mutate_task(self.task_id, _update)
 
     def record_error(self, error: str) -> None:
+        safe_error = sanitize_text(error)
+
         def _update(task: TaskModel) -> None:
             task.error_count += 1
             result = task.get_result()
             errors = list(result.get("errors", []))
-            errors.append(error)
+            errors.append(safe_error)
             result["errors"] = errors
             task.set_result(result)
 
@@ -440,11 +447,13 @@ class TaskLogger:
         _mutate_task(self.task_id, _update)
 
     def finish(self, status: str, *, error: str = "") -> None:
+        safe_error = sanitize_text(error)
+
         def _update(task: TaskModel) -> None:
             task.status = status
             task.finished_at = _utcnow()
-            if error:
-                task.error = error
+            if safe_error:
+                task.error = safe_error
 
         _mutate_task(self.task_id, _update)
         event_level = "error" if status == TASK_STATUS_FAILED else ("warning" if status in {TASK_STATUS_INTERRUPTED, TASK_STATUS_CANCELLED} else "info")
@@ -452,7 +461,7 @@ class TaskLogger:
             f"任务结束: {status}",
             level=event_level,
             event_type="state",
-            detail={"status": status, "error": error},
+            detail={"status": status, "error": safe_error},
         )
 
 

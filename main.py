@@ -60,6 +60,7 @@ from api.task_commands import router as task_commands_router
 from api.task_logs import router as task_logs_router
 from api.tasks import router as tasks_router
 from core.db import init_db
+from core.log_sanitizer import install_log_sanitizer
 from core.registry import load_all
 from providers.registry import load_all as load_providers
 
@@ -94,6 +95,8 @@ async def lifespan(app: FastAPI):
     from services.solver_manager import stop
     stop()
 
+
+install_log_sanitizer()
 
 app = FastAPI(title="Account Manager", version="2.0.0", lifespan=lifespan)
 

@@ -14,6 +14,7 @@ from urllib.parse import urlparse,parse_qs,quote as url_quote,urlencode
 import cbor2
 from curl_cffi import requests as curl_requests
 from jwcrypto import jwk, jwe
+from core.log_sanitizer import safe_print
 
 KIRO="https://app.kiro.dev"
 SIGNIN="https://us-east-1.signin.aws"
@@ -235,7 +236,7 @@ class KiroRegister:
         self._workflow_result_handle=None  # step 10 redirect URL 中的 workflowResultHandle
         self._step11_state=None        # step 11 redirect URL 中的 state
 
-    def log(self,msg): print(f"[{self.tag}] {msg}")
+    def log(self,msg): safe_print(f"[{self.tag}] {msg}")
 
     def _capture_cookies(self,resp):
         """捕获 Set-Cookie 响应头中的 cookies.
@@ -319,7 +320,7 @@ class KiroRegister:
                         except: pass
                 self.s.cookies.set("directory-csrf-token", new_val,
                                    domain=domain, path=dir_csrf_path)
-                self.log(f"  ★ directory-csrf-token 已添加 signupCsrfToken={signup_token[:12]}")
+                self.log("  ★ directory-csrf-token 已添加 signupCsrfToken")
             elif signup_token:
                 self.log(f"  ★ directory-csrf-token 已有 signupCsrfToken, 跳过")
         except Exception as e:
@@ -553,7 +554,7 @@ class KiroRegister:
         self.log(f"  Status: {r.status_code}")
         if r.status_code==200:
             d=r.json(); token=d.get("token","")
-            self.log(f"  ✅ awsd2c-token: {token[:60]}...")
+            self.log("  ✅ awsd2c-token 已获取")
             self._awsd2c_token=token
             try:
                 parts=token.split(".")
@@ -1013,7 +1014,7 @@ class KiroRegister:
         if not bearer_token:
             self.log(f"  ❌ 无 bearer token: {json.dumps(sso_resp, ensure_ascii=False)[:300]}")
             return None
-        self.log(f"  ✅ bearer token (sessionToken)={bearer_token[:60]}...")
+        self.log("  ✅ bearer token (sessionToken) 已获取")
         self.log(f"  redirectUrl={sso_redirect[:120]}...")
 
         # ── 12a2: GET redirectUrl → 建立 view.awsapps.com SSO session cookie ──
@@ -1152,7 +1153,7 @@ class KiroRegister:
         if not access_token:
             self.log(f"  ❌ 无 accessToken: {resp_data}")
             return None
-        self.log(f"  ✅ accessToken={access_token[:60]}...")
+        self.log("  ✅ accessToken 已获取")
         self.log(f"  ✅ csrfToken={kiro_csrf[:30]}...")
         self.log(f"  expiresIn={expires_in}")
         return {
@@ -1304,7 +1305,7 @@ class KiroRegister:
         device_token = bearer_token
         if r.status_code == 200:
             device_token = r.json().get("token", bearer_token)
-        self.log(f"  ✅ device_token={device_token[:60]}...")
+        self.log("  ✅ device_token 已获取")
 
         # 12h-3: POST oidc/consent_details
         self.log("  12h-3: POST consent_details...")
@@ -1373,8 +1374,8 @@ class KiroRegister:
 
         oidc_access = oidc_token.get("accessToken", "")
         refresh_token = oidc_token.get("refreshToken", "")
-        self.log(f"  ✅ OIDC accessToken={oidc_access[:60]}...")
-        self.log(f"  ✅ refreshToken={refresh_token[:60]}...")
+        self.log("  ✅ OIDC accessToken 已获取")
+        self.log("  ✅ refreshToken 已获取")
         return {
             "clientId": client_id,
             "clientSecret": client_secret,
@@ -1401,7 +1402,7 @@ class KiroRegister:
 #
 # def wait_for_otp_techflow(email, timeout=120, tag=""):
 #     prefix = f"[{tag}] " if tag else ""
-#     print(f"{prefix}  等待验证码邮件 (最多{timeout}s)...")
+#     safe_print(f"{prefix}  等待验证码邮件 (最多{timeout}s)...")
 #     s = curl_requests.Session()
 #     h = _techflow_headers()
 #     start = time.time()
@@ -1432,13 +1433,13 @@ class KiroRegister:
 #                         m = re.search(pat, raw, re.IGNORECASE)
 #                         if m:
 #                             code = m.group(1)
-#                             print(f"{prefix}  ✅ 验证码: {code}")
+#                             safe_print(f"{prefix}  ✅ 验证码已获取")
 #                             return code
 #         except: pass
 #         elapsed = int(time.time() - start)
-#         print(f"{prefix}  等待中... ({elapsed}s/{timeout}s)")
+#         safe_print(f"{prefix}  等待中... ({elapsed}s/{timeout}s)")
 #         time.sleep(3)
-#     print(f"{prefix}  ❌ 验证码超时")
+#     safe_print(f"{prefix}  ❌ 验证码超时")
 #     return None
 
 # ═══════════════════════════════════════════
@@ -1527,7 +1528,7 @@ def wait_for_otp(account_id=None, timeout=120, tag=""):
     if not account_id:
         account_id = LAOUDO_ACCOUNT_ID
     prefix = f"[{tag}] " if tag else ""
-    print(f"{prefix}  等待验证码邮件 (最多{timeout}s)...")
+    safe_print(f"{prefix}  等待验证码邮件 (最多{timeout}s)...")
     h = _laoudo_headers()
     start = time.time()
     seen_ids = set()
@@ -1581,22 +1582,22 @@ def wait_for_otp(account_id=None, timeout=120, tag=""):
                         m = re.search(pat, combined, re.IGNORECASE)
                         if m:
                             code = m.group(1)
-                            print(f"{prefix}  ✅ 验证码: {code}")
+                            safe_print(f"{prefix}  ✅ 验证码已获取")
                             return code
         except Exception as e:
-            print(f"{prefix}  ⚠️ 查询邮件异常: {e}")
+            safe_print(f"{prefix}  ⚠️ 查询邮件异常: {e}")
         elapsed = int(time.time() - start)
-        print(f"{prefix}  等待中... ({elapsed}s/{timeout}s)")
+        safe_print(f"{prefix}  等待中... ({elapsed}s/{timeout}s)")
         time.sleep(3)
-    print(f"{prefix}  ❌ 验证码超时")
+    safe_print(f"{prefix}  ❌ 验证码超时")
     return None
 
 
 def main():
-    print("=" * 50)
-    print("Kiro / AWS Builder ID 自动注册工具 v10")
-    print("(v8核心 + laoudo.com 邮箱)")
-    print("=" * 50)
+    safe_print("=" * 50)
+    safe_print("Kiro / AWS Builder ID 自动注册工具 v10")
+    safe_print("(v8核心 + laoudo.com 邮箱)")
+    safe_print("=" * 50)
     mode = input("模式: 1=手动输入邮箱 2=laoudo固定邮箱 (默认2): ").strip()
     proxy = input("代理 (留空跳过): ").strip() or None
     pwd = input("密码 (留空自动生成): ").strip() or None
@@ -1605,26 +1606,26 @@ def main():
     mail_token = None
     if mode == "1":
         email = input("请输入邮箱: ").strip()
-        if not email: print("邮箱不能为空"); return
+        if not email: safe_print("邮箱不能为空"); return
     else:
         email = LAOUDO_EMAIL
         mail_token = LAOUDO_ACCOUNT_ID
-        print(f"✅ 邮箱: {email} (laoudo accountId={LAOUDO_ACCOUNT_ID})")
+        safe_print(f"✅ 邮箱: {email} (laoudo accountId={LAOUDO_ACCOUNT_ID})")
 
     reg = KiroRegister(proxy=proxy, tag="REG-1")
     ok, info = reg.register(email, pwd=pwd, name=name,
                             mail_token=mail_token)
     if ok:
-        print(f"\n✅ 注册成功!")
-        print(f"  邮箱: {info['email']}")
-        print(f"  密码: {info['password']}")
+        safe_print(f"\n✅ 注册成功!")
+        safe_print(f"  邮箱: {info['email']}")
+        safe_print("  密码: 已生成")
         if info.get('accessToken'):
-            print(f"  accessToken: {info['accessToken'][:60]}...")
-            print(f"  sessionToken: {info['sessionToken'][:60]}...")
+            safe_print("  accessToken: 已获取")
+            safe_print("  sessionToken: 已获取")
         if info.get('refreshToken'):
-            print(f"  clientId: {info['clientId'][:40]}...")
-            print(f"  clientSecret: {info['clientSecret'][:40]}...")
-            print(f"  refreshToken: {info['refreshToken'][:60]}...")
+            safe_print("  clientId: 已获取")
+            safe_print("  clientSecret: 已获取")
+            safe_print("  refreshToken: 已获取")
         with open("kiro_accounts.txt", "a") as f:
             rec = json.dumps({
                 "email": info['email'],
@@ -1636,9 +1637,9 @@ def main():
                 "refreshToken": info.get('refreshToken', ''),
             }, ensure_ascii=False)
             f.write(rec + "\n")
-        print("  已保存到 kiro_accounts.txt")
+        safe_print("  已保存到 kiro_accounts.txt")
     else:
-        print(f"\n❌ 注册失败: {info.get('error')}")
+        safe_print(f"\n❌ 注册失败: {info.get('error')}")
 
 if __name__ == "__main__":
     main()

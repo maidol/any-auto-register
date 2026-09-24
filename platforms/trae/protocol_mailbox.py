@@ -24,7 +24,7 @@ class TraeProtocolMailboxWorker:
         otp = otp_callback() if otp_callback else input("OTP: ")
         if not otp:
             raise RuntimeError("未获取到验证码")
-        self.log(f"验证码: {otp}")
+        self.log("验证码已获取")
         user_id = self.client.step3_register(email, use_password, otp)
         self.client.step4_trae_login()
         token = self.client.step5_get_token()

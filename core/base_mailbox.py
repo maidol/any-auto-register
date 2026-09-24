@@ -8,6 +8,7 @@ from urllib.parse import urlencode, urlparse
 
 logger = logging.getLogger(__name__)
 
+from core.log_sanitizer import safe_print
 from core.tls import insecure_request, mark_session_insecure, suppress_insecure_request_warning
 
 # ── 邮箱服务默认 API 地址（统一维护，需要时在此修改） ──
@@ -89,16 +90,16 @@ class FallbackMailbox(BaseMailbox):
         errors: list[str] = []
         for provider_key, mailbox in self.providers:
             try:
-                print(f"[Mailbox] 尝试 provider: {provider_key}")
+                safe_print(f"[Mailbox] 尝试 provider: {provider_key}")
                 account = mailbox.get_email()
                 self._accounts[str(account.email or "").strip()] = mailbox
                 self._inject_provider_metadata(account, provider_key)
-                print(f"[Mailbox] 使用 provider 成功: {provider_key} -> {account.email}")
+                safe_print(f"[Mailbox] 使用 provider 成功: {provider_key} -> {account.email}")
                 return account
             except Exception as exc:
                 message = str(exc).strip() or exc.__class__.__name__
                 errors.append(f"{provider_key}: {message}")
-                print(f"[Mailbox] provider 失败: {provider_key} -> {message}")
+                safe_print(f"[Mailbox] provider 失败: {provider_key} -> {message}")
                 continue
         raise RuntimeError("所有邮箱 provider 均创建失败: " + " | ".join(errors))
 
@@ -845,7 +846,7 @@ class TempMailWebMailbox(BaseMailbox):
             if status != 429 or attempt >= max_attempts:
                 return self._decode_json_response(result, action)
             wait_seconds = min(20, 3 * attempt + random.uniform(0.5, 2.5))
-            print(f"[TempMailWeb] {action} 遇到 429，等待 {wait_seconds:.1f}s 后重试 ({attempt}/{max_attempts})")
+            safe_print(f"[TempMailWeb] {action} 遇到 429，等待 {wait_seconds:.1f}s 后重试 ({attempt}/{max_attempts})")
             time.sleep(wait_seconds)
 
         return self._decode_json_response(result, action)
@@ -859,7 +860,7 @@ class TempMailWebMailbox(BaseMailbox):
         if not address or not token:
             raise RuntimeError(f"Temp-Mail Web 创建邮箱失败: {json.dumps(data, ensure_ascii=False)[:300]}")
         self._accounts[address] = token
-        print(f"[TempMailWeb] 生成邮箱: {address}")
+        safe_print(f"[TempMailWeb] 生成邮箱: {address}")
         return MailboxAccount(
             email=address,
             account_id=token,
@@ -947,7 +948,7 @@ class TempMailWebMailbox(BaseMailbox):
                         continue
                     code = self._extract_code(item, code_pattern=code_pattern)
                     if code:
-                        print(f"[TempMailWeb] 收到验证码: {code}")
+                        safe_print("[TempMailWeb] 验证码已获取")
                         return code
             except Exception:
                 pass
@@ -1191,12 +1192,12 @@ class CFWorkerMailbox(BaseMailbox):
         r = requests.post(f"{self.api}/admin/new_address",
             json=payload, headers=self._headers(),
             proxies=self.proxy, timeout=15)
-        print(f"[CFWorker] new_address status={r.status_code} resp={r.text[:200]}")
+        safe_print(f"[CFWorker] new_address status={r.status_code} resp={r.text[:200]}")
         data = r.json()
         email = data.get("email", data.get("address", ""))
         token = data.get("token", data.get("jwt", ""))
         self._token = token
-        print(f"[CFWorker] 生成邮箱: {email} token={token[:40] if token else 'NONE'}...")
+        safe_print(f"[CFWorker] 生成邮箱: {email} token={'已获取' if token else 'NONE'}")
         return MailboxAccount(
             email=email,
             account_id=token,
@@ -1346,7 +1347,7 @@ class MoeMailMailbox(BaseMailbox):
             self._apply_session_token(s, self._configured_session_token)
             self._session = s
             self._session_token = self._configured_session_token
-            print("[MoeMail] 使用已提供的 session-token")
+            safe_print("[MoeMail] 使用已提供的 session-token")
             return self._configured_session_token
 
         if not (self._configured_username and self._configured_password):
@@ -1375,7 +1376,7 @@ class MoeMailMailbox(BaseMailbox):
         token = self._extract_session_token(s)
         if token:
             self._session_token = token
-            print("[MoeMail] 使用手动注册账号登录成功")
+            safe_print("[MoeMail] 使用手动注册账号登录成功")
             return token
         raise RuntimeError(
             f"MoeMail 登录失败: 已提供用户名密码，但未获取到 session-token (HTTP {login_resp.status_code})"
@@ -1397,12 +1398,12 @@ class MoeMailMailbox(BaseMailbox):
         password = "Test" + "".join(random.choices(string.digits, k=8)) + "!"
         self._username = username
         self._password = password
-        print(f"[MoeMail] 注册账号: {username} / {password}")
+        safe_print("[MoeMail] 注册账号凭据已准备")
         with suppress_insecure_request_warning():
             r_reg = s.post(f"{self.api}/api/auth/register",
                 json={"username": username, "password": password, "turnstileToken": ""},
                 timeout=15)
-        print(f"[MoeMail] 注册结果: {r_reg.status_code} {r_reg.text[:80]}")
+        safe_print(f"[MoeMail] 注册结果: {r_reg.status_code} {r_reg.text[:80]}")
         if r_reg.status_code >= 400:
             try:
                 register_error = r_reg.json().get("error") or r_reg.text
@@ -1429,9 +1430,9 @@ class MoeMailMailbox(BaseMailbox):
         token = self._extract_session_token(s)
         if token:
             self._session_token = token
-            print(f"[MoeMail] 登录成功")
+            safe_print(f"[MoeMail] 登录成功")
             return token
-        print(f"[MoeMail] 登录失败，cookies: {[c.name for c in s.cookies]}")
+        safe_print(f"[MoeMail] 登录失败，cookies: {[c.name for c in s.cookies]}")
         raise RuntimeError(
             f"MoeMail 登录失败: 未获取到 session-token (HTTP {login_resp.status_code})"
         )
@@ -1468,9 +1469,9 @@ class MoeMailMailbox(BaseMailbox):
         data = r.json()
         self._email = data.get("email", data.get("address", ""))
         email_id = data.get("id", "")
-        print(f"[MoeMail] 生成邮箱: {self._email} id={email_id} domain={domain} status={r.status_code}")
+        safe_print(f"[MoeMail] 生成邮箱: {self._email} id={email_id} domain={domain} status={r.status_code}")
         if not email_id:
-            print(f"[MoeMail] 生成失败: {data}")
+            safe_print(f"[MoeMail] 生成失败: {data}")
             generate_error = data.get("error") or data.get("message") or r.text
             raise RuntimeError(f"MoeMail 生成邮箱失败: {str(generate_error).strip() or f'HTTP {r.status_code}'}")
         if not self._email:
@@ -1618,7 +1619,7 @@ class FreemailMailbox(BaseMailbox):
         data = r.json()
         email = data.get("email", "")
         self._email = email
-        print(f"[Freemail] 生成邮箱: {email}")
+        safe_print(f"[Freemail] 生成邮箱: {email}")
         provider_account = {
             "provider_type": "mailbox",
             "provider_name": "freemail",
@@ -1951,7 +1952,7 @@ class DDGEmailMailbox(BaseMailbox):
         if not address:
             raise RuntimeError(f"DDG Email 创建别名失败: {r.text[:200]}")
         email = f"{address}@duck.com"
-        print(f"[DDG Email] 创建别名: {email}")
+        safe_print(f"[DDG Email] 创建别名: {email}")
         return MailboxAccount(
             email=email,
             account_id=address,
@@ -2001,7 +2002,7 @@ class DDGEmailMailbox(BaseMailbox):
                 if not baseline_done:
                     seen_ids = set(ids)
                     baseline_done = True
-                    print(f"[DDG Email] IMAP baseline: {len(seen_ids)} existing emails skipped")
+                    safe_print(f"[DDG Email] IMAP baseline: {len(seen_ids)} existing emails skipped")
                     conn.logout()
                     conn = None
                     time.sleep(5)
@@ -2051,12 +2052,12 @@ class DDGEmailMailbox(BaseMailbox):
                     m = re.search(pattern, combined)
                     if m:
                         code = m.group(1) if m.groups() else m.group(0)
-                        print(f"[DDG Email] IMAP 获取验证码: {code}")
+                        safe_print("[DDG Email] IMAP 验证码已获取")
                         return code
 
                 conn.logout()
             except (imaplib.IMAP4.error, OSError) as e:
-                print(f"[DDG Email] IMAP 连接异常: {e}")
+                safe_print(f"[DDG Email] IMAP 连接异常: {e}")
             finally:
                 if conn:
                     try:

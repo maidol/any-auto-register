@@ -23,6 +23,8 @@ from .http_client import OpenAIHTTPClient, HTTPClientError
 # from ..services import EmailServiceFactory, BaseEmailService, EmailServiceType  # removed: external dep
 # from ..database import crud  # removed: external dep
 # from ..database.session import get_db  # removed: external dep
+from core.log_sanitizer import sanitize_text
+
 from .constants import (
     OPENAI_API_ENDPOINTS,
     OPENAI_PAGE_TYPES,
@@ -246,30 +248,31 @@ class RegistrationEngine:
     def _log(self, message: str, level: str = "info"):
         """记录日志"""
         timestamp = datetime.now(timezone.utc).astimezone().strftime("%H:%M:%S")
-        log_message = f"[{timestamp}] {message}"
+        safe_message = sanitize_text(message)
+        log_message = f"[{timestamp}] {safe_message}"
 
         # 添加到日志列表
         self.logs.append(log_message)
 
         # 调用回调函数
         if self.callback_logger:
-            self.callback_logger(message)
+            self.callback_logger(safe_message)
 
         # 记录到数据库（如果有关联任务）
         if self.task_uuid:
             try:
                 with get_db() as db:
-                    crud.append_task_log(db, self.task_uuid, message)
+                    crud.append_task_log(db, self.task_uuid, safe_message)
             except Exception as e:
-                logger.warning(f"记录任务日志失败: {e}")
+                logger.warning("记录任务日志失败: %s", e)
 
         # 根据级别记录到日志系统
         if level == "error":
-            logger.error(message)
+            logger.error(safe_message)
         elif level == "warning":
-            logger.warning(message)
+            logger.warning(safe_message)
         else:
-            logger.info(message)
+            logger.info(safe_message)
 
     def _generate_password(self, length: int = DEFAULT_PASSWORD_LENGTH) -> str:
         """生成随机密码"""
@@ -347,7 +350,7 @@ class RegistrationEngine:
                 # 从 cookie 中提取
                 csrf_cookie = self.session.cookies.get("__Host-next-auth.csrf-token", "")
                 csrf_token = csrf_cookie.split("%7C")[0] if "%7C" in csrf_cookie else csrf_cookie.split("|")[0]
-            self._log(f"CSRF token: {csrf_token[:20]}...")
+            self._log("CSRF token 已获取")
 
             # 3. 调用 signin/openai 获取 authorize URL
             signin_url = f"{CHATGPT_APP}/api/auth/signin/openai"
@@ -575,7 +578,7 @@ class RegistrationEngine:
                             f"turnstile={'yes' if self._password_sentinel.t else 'no'}"
                         )
 
-                self._log(f"生成密码[{index}/{len(candidates)}]: {password}")
+                self._log(f"密码候选已准备[{index}/{len(candidates)}]")
 
                 register_body = json.dumps({
                     "password": password,
@@ -706,7 +709,7 @@ class RegistrationEngine:
             )
 
             if code:
-                self._log(f"成功获取验证码: {code}")
+                self._log("验证码已获取")
                 return code
             else:
                 self._log("等待验证码超时", "error")
@@ -1343,7 +1346,7 @@ class RegistrationEngine:
             session_token = self.session.cookies.get("__Secure-next-auth.session-token")
             account_cookie = self.session.cookies.get("_account", "")
             if session_token:
-                self._log(f"获取到 session-token: {session_token[:30]}...")
+                self._log("session-token 已获取")
             if account_cookie:
                 self._log(f"获取到 _account: {account_cookie}")
 
@@ -1459,7 +1462,7 @@ class RegistrationEngine:
                     code = self._get_verification_code()
                     if not code:
                         raise RuntimeError("Codex OTP 获取失败")
-                    self._log(f"Codex OTP: {code}")
+                    self._log("Codex OTP 已获取")
 
                     # 验证 OTP
                     otp_resp = login_session.post(

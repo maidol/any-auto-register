@@ -32,7 +32,7 @@ class WindsurfProtocolMailboxWorker:
         verification_token = self.client.start_email_signup(email)
         raw_code = otp_callback()
         code = self._extract_code(raw_code)
-        self.log(f"获取 Windsurf 验证码: {code}")
+        self.log("Windsurf 验证码已获取")
 
         complete = self.client.complete_email_signup(
             email=email,

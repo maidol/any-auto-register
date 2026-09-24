@@ -372,7 +372,7 @@ class KiroBrowserRegister:
                 code = self.otp_callback()
                 if not code:
                     raise RuntimeError("未获取到邮箱验证码")
-                self.log(f"填写验证码: {code}")
+                self.log("验证码已获取")
                 otp_el.click()
                 for digit in str(code).strip():
                     page.keyboard.press(digit)

@@ -254,7 +254,7 @@ class BlinkRegister:
         return bool(response.json().get("success"))
 
     def step2_redeem_magic_link(self, token: str, email: str) -> dict[str, Any]:
-        self.log(f"Step2: 兑换魔法链接 token={token[:16]}...")
+        self.log("Step2: 兑换魔法链接 token 已获取")
         response = self.s.get(
             f"{BLINK_BASE}/api/auth/main-app/magic-link",
             params={"token": token, "email": email},
