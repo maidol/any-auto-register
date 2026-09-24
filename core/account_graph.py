@@ -845,6 +845,18 @@ def sync_account_graph(session: Session, model: AccountModel) -> None:
     )
 
 
+FAILURE_OVERVIEW_KEYS = ("failure_stage", "failure_reason", "failed_at")
+
+
+def _drop_failure_markers(summary: dict[str, Any]) -> None:
+    """overview 是合并写的：账号离开 failed 状态时不显式删掉，
+    失败阶段和原因会原样留在一个已经注册成功的账号上。"""
+    if summary.get("lifecycle_status") == "failed":
+        return
+    for key in FAILURE_OVERVIEW_KEYS:
+        summary.pop(key, None)
+
+
 def sync_platform_account_graph(session: Session, model: AccountModel, account: Any) -> None:
     account_id = int(model.id or 0)
     if account_id <= 0:
@@ -877,6 +889,7 @@ def sync_platform_account_graph(session: Session, model: AccountModel, account: 
         }
     summary["chips"] = _dedupe_chips(existing_summary.get("chips") or [], incoming_summary.get("chips") or [])
     summary["lifecycle_status"] = lifecycle_status
+    _drop_failure_markers(summary)
 
     platform = model.platform
     existing_credentials = [item for item in current.get("credentials") or [] if item.get("scope") == "platform"]
@@ -937,6 +950,7 @@ def patch_account_graph(
         summary["trial_end_time"] = int(trial_end_time or 0)
     effective_lifecycle = _text(lifecycle_status) or _text(current.get("lifecycle_status")) or "registered"
     summary["lifecycle_status"] = effective_lifecycle
+    _drop_failure_markers(summary)
 
     existing_credentials = [item for item in current.get("credentials") or [] if item.get("scope") == "platform"]
     incoming_credentials: list[dict[str, Any]] = []

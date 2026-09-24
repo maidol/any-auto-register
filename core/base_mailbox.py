@@ -159,6 +159,11 @@ class PinnedMailbox(BaseMailbox):
             self._pinned = self.wrapped.get_email()
         return self._pinned
 
+    @property
+    def pinned_email(self) -> str:
+        """本周期已经拿到的邮箱；还没拿过就是空串。只读，不会去开新地址。"""
+        return self._pinned.email if self._pinned is not None else ""
+
     def get_current_ids(self, account: MailboxAccount) -> set:
         return self.wrapped.get_current_ids(account)
 

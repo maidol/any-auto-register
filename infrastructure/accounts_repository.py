@@ -159,6 +159,11 @@ class AccountsRepository:
                 "plan_state": item.plan_state,
                 "validity_status": item.validity_status,
             }, selection.status_filter)]
+        elif selection.select_all:
+            # 全选且没按状态筛选时不带出注册失败的账号：它们没有 token，
+            # 混进 Sub2API/CPA 导出就是一批空凭据，手动推 Sub2API 时还会
+            # 连续失败 3 次触发中止，把排在后面的好账号一起丢掉。
+            records = [item for item in records if item.lifecycle_status != "failed"]
         return records
 
     def create(self, command: AccountCreateCommand) -> AccountRecord:

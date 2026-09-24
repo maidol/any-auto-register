@@ -13,7 +13,12 @@ from camoufox.sync_api import Camoufox
 
 from core.base_sms import HeroSmsCodeTimeoutError
 
-from core.registration.errors import RegistrationAttemptError
+from core.registration.errors import (
+    FAILURE_CREATED,
+    FAILURE_NOT_CREATED,
+    FAILURE_OAUTH,
+    RegistrationAttemptError,
+)
 
 from .constants import (
     OPENAI_AUTH,
@@ -4078,7 +4083,11 @@ def _browser_registration_flow(
     phone_callback,
     log,
     max_phone_attempts: int = 3,
+    progress: Optional[dict] = None,
 ) -> dict:
+    # progress["account_exists"]：ChatGPT 那边已经有这个邮箱了。状态机中途抛错时
+    # 调用方靠它区分「未新建」和「已新建」，所以必须在抛错之前置上。
+    progress = progress if progress is not None else {}
     device_id = str(uuid.uuid4())
     try:
         user_agent = str(page.evaluate("() => navigator.userAgent") or "").strip() or _random_chrome_ua()
@@ -4137,6 +4146,7 @@ def _browser_registration_flow(
             if not reg_resp.get("ok"):
                 raise RuntimeError(f"密码页提交失败: {(reg_resp.get('text') or '')[:300]}")
             register_submitted = True
+            progress["account_exists"] = True
             state = _extract_flow_state(reg_resp.get("data"), reg_resp.get("url", page.url))
             if not state.get("page_type") or _is_password_registration(state):
                 state = _derive_registration_state_from_page(page)
@@ -4147,6 +4157,7 @@ def _browser_registration_flow(
                 state = _derive_registration_state_from_page(page)
                 continue
             log("注册流程落到已有账号登录密码页，按登录流程继续认证...")
+            progress["account_exists"] = True
             login_resp = _submit_oauth_password_direct(page, password, log)
             log(f"登录密码页提交状态: {login_resp.get('status', 0)}")
             if not login_resp.get("ok"):
@@ -4280,6 +4291,7 @@ class ChatGPTBrowserRegister:
                 launch_opts["proxy"] = proxy
                 launch_opts["geoip"] = True
 
+            progress: dict = {}
             with Camoufox(**launch_opts) as browser:
                 page = browser.new_page()
                 self.log("启动浏览器上下文注册状态机")
@@ -4292,11 +4304,13 @@ class ChatGPTBrowserRegister:
                         self.phone_callback,
                         self.log,
                         self.max_phone_attempts,
+                        progress=progress,
                     )
                 except Exception as exc:
                     raise RegistrationAttemptError(
                         str(exc) or exc.__class__.__name__,
                         stage="signup_started",
+                        failure_stage=FAILURE_CREATED if progress.get("account_exists") else FAILURE_NOT_CREATED,
                         email=email,
                         password=password,
                     ) from exc
@@ -4328,6 +4342,7 @@ class ChatGPTBrowserRegister:
         raise RegistrationAttemptError(
             "ChatGPT 注册未完成完整 OAuth callback，已拒绝回退到 session/access_token 半成品结果",
             stage="account_created" if account_created else "signup_started",
+            failure_stage=FAILURE_OAUTH,
             email=email,
             password=password,
         )

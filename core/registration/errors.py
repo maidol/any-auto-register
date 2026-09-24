@@ -25,6 +25,15 @@ class RegistrationUnsupportedError(RegistrationError):
     """当前平台或执行器不支持该注册路径。"""
 
 
+#: 注册失败账号在列表里的细分阶段（overview.failure_stage）。只管展示，
+#: 和下面的 RegistrationAttemptError.stage 是两件事：stage 决定下一次尝试
+#: 要不要跳过注册入口，这里只回答「ChatGPT 那边有没有这个账号」。
+FAILURE_NOT_CREATED = "not_created"
+FAILURE_CREATED = "created_other_failed"
+FAILURE_OAUTH = "created_oauth_failed"
+FAILURE_UNKNOWN = "unknown"
+
+
 class RegistrationAttemptError(RegistrationError):
     """一次尝试失败了，并且带着「这次走到哪儿」这件事一起失败。
 
@@ -47,11 +56,13 @@ class RegistrationAttemptError(RegistrationError):
         message: str,
         *,
         stage: str = "",
+        failure_stage: str = "",
         email: str = "",
         password: str = "",
     ) -> None:
         super().__init__(message)
         self.stage = stage
+        self.failure_stage = failure_stage
         self.email = email
         self.password = password
 

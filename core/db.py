@@ -334,6 +334,48 @@ def save_account(account) -> 'AccountModel':
         return m
 
 
+def save_failed_account(
+    platform: str,
+    email: str,
+    password: str,
+    *,
+    failure_stage: str,
+    failure_reason: str,
+) -> bool:
+    """注册失败也落一行「注册失败」账号，让这对凭据在账号列表里看得见。
+
+    同平台同邮箱已经有一条**不是**注册失败的账号时一律不碰：固定邮箱重跑时，
+    一次失败的尝试不能把好账号改成注册失败，更不能换掉它的密码。
+    返回是否写入。
+    """
+    from core.account_graph import load_account_graphs
+    from core.base_platform import Account, AccountStatus
+
+    with Session(engine) as session:
+        existing = session.exec(
+            select(AccountModel)
+            .where(AccountModel.platform == platform)
+            .where(AccountModel.email == email)
+        ).first()
+        if existing is not None:
+            graph = load_account_graphs(session, [int(existing.id)]).get(int(existing.id), {})
+            if graph.get("lifecycle_status") != AccountStatus.FAILED.value:
+                return False
+
+    save_account(Account(
+        platform=platform,
+        email=email,
+        password=password,
+        status=AccountStatus.FAILED,
+        extra={"account_overview": {
+            "failure_stage": failure_stage,
+            "failure_reason": str(failure_reason or "")[:500],
+            "failed_at": _utcnow().isoformat(),
+        }},
+    ))
+    return True
+
+
 LEGACY_ACCOUNT_COLUMNS = (
     "region",
     "token",

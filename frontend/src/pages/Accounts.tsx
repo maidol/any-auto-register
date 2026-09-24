@@ -15,8 +15,15 @@ import { RefreshCw, Copy, ExternalLink, Download, Upload, Plus, X, Mail, Trash2,
 
 const STATUS_VARIANT: Record<string, any> = {
   registered: 'default', trial: 'success', subscribed: 'success',
-  expired: 'warning', invalid: 'danger',
+  expired: 'warning', invalid: 'danger', failed: 'danger',
   free: 'secondary', eligible: 'secondary', valid: 'success', unknown: 'secondary',
+}
+
+const FAILURE_STAGE_TEXT: Record<string, string> = {
+  not_created: '未新建',
+  created_other_failed: '已建号',
+  created_oauth_failed: '已建号·OAuth失败',
+  unknown: '阶段未知',
 }
 
 const platformActionsCache = new Map<string, any[]>()
@@ -1775,6 +1782,7 @@ export default function Accounts() {
               <option value="eligible">可试用</option>
               <option value="expired">已过期</option>
               <option value="invalid">已失效</option>
+              <option value="failed">注册失败</option>
             </select>
           </div>
           
@@ -1974,6 +1982,11 @@ export default function Accounts() {
                         <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset ${styles}`}>
                           <span className={`mr-1 h-1 w-1 rounded-full ${variant === 'success' ? 'bg-emerald-500 shadow-[0_0_4px_rgba(16,185,129,0.6)]' : variant === 'warning' ? 'bg-amber-500 shadow-[0_0_4px_rgba(245,158,11,0.6)]' : variant === 'danger' ? 'bg-red-500 shadow-[0_0_4px_rgba(239,68,68,0.6)]' : variant === 'default' ? 'bg-blue-500' : 'bg-gray-400'}`}></span>
                           {status}
+                          {status === 'failed' && getAccountOverview(acc).failure_stage && (
+                            <span className="ml-1" title={getAccountOverview(acc).failure_reason || ''}>
+                              · {FAILURE_STAGE_TEXT[getAccountOverview(acc).failure_stage] || getAccountOverview(acc).failure_stage}
+                            </span>
+                          )}
                         </span>
                       );
                     })()}

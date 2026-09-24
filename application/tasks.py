@@ -17,7 +17,7 @@ from core.account_graph import (
 )
 from core.base_platform import AccountStatus, RegisterConfig
 from core.datetime_utils import format_local_clock, serialize_datetime
-from core.db import AccountModel, TaskEventModel, TaskLog, TaskModel, engine, save_account
+from core.db import AccountModel, TaskEventModel, TaskLog, TaskModel, engine, save_account, save_failed_account
 from core.platform_accounts import build_platform_account
 from core.registry import get
 from infrastructure.platform_runtime import PlatformRuntime
@@ -752,7 +752,7 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
 
     from core.base_mailbox import PinnedMailbox
     from core.proxy_pool import proxy_pool
-    from core.registration.errors import RegistrationAttemptError
+    from core.registration.errors import FAILURE_UNKNOWN, RegistrationAttemptError
     from core.registration.strategy import (
         CANCELLED,
         COMPLETED,
@@ -880,6 +880,27 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
         cycle["mailbox"] = PinnedMailbox(shared_mailbox) if shared_mailbox is not None else None
         cycle["open"] = True
 
+    def _keep_failed_account(exc: Exception, error: str) -> None:
+        """这次尝试失败了：把这对凭据落成一条「注册失败」账号。
+
+        写库出错只记日志——它不能改变这次尝试的结果，也不能打断重试。
+        """
+        pinned = cycle["mailbox"].pinned_email if cycle["mailbox"] is not None else ""
+        failed_email = getattr(exc, "email", "") or email or pinned
+        if not failed_email:
+            logger.log("本次尝试还没拿到邮箱，不记录失败账号", level="warning")
+            return
+        try:
+            save_failed_account(
+                platform_name,
+                failed_email,
+                getattr(exc, "password", "") or cycle["password"] or "",
+                failure_stage=getattr(exc, "failure_stage", "") or FAILURE_UNKNOWN,
+                failure_reason=error,
+            )
+        except Exception as save_exc:
+            logger.log(f"失败账号落库失败（不影响本次结果）: {save_exc}", level="warning")
+
     def _register_once(index: int, attempt: int, resolved_proxy: str | None) -> AttemptOutcome:
         if attempt == 0:
             _open_cycle()
@@ -918,12 +939,14 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
             logger.record_error(error)
             logger.log(f"✗ 注册失败: {error}", level="error")
             _save_task_log(platform_name, exc.email or email or "", "failed", error=error)
+            _keep_failed_account(exc, error)
             return AttemptOutcome(ok=False, error=error, account_saved=False, proxy_health=PROXY_FAIL)
         except Exception as exc:
             error = str(exc) or exc.__class__.__name__
             logger.record_error(error)
             logger.log(f"✗ 注册失败: {error}", level="error")
             _save_task_log(platform_name, email or "", "failed", error=error)
+            _keep_failed_account(exc, error)
             return AttemptOutcome(ok=False, error=error, account_saved=False, proxy_health=PROXY_FAIL)
 
         # 落库之后的任何失败都不得触发重试：重试会再注册一个新账号，

@@ -16,6 +16,7 @@ class AccountStatus(str, Enum):
     SUBSCRIBED   = "subscribed"
     EXPIRED      = "expired"
     INVALID      = "invalid"
+    FAILED       = "failed"   # 注册失败：没拿到可用 token，留在列表里只为找回这对凭据
 
 
 @dataclass
