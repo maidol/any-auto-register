@@ -2136,15 +2136,18 @@ def _do_codex_oauth(
                 if phone_callback:
                     log("  OAuth 检测到 add_phone，优先执行短信验证...")
                     try:
+                        # 每次 OAuth 只用一个号码：号码失败后页面停在验证码页，同页换号走不下去。
+                        # 换号由 ChatGPTBrowserRegister._retry_oauth_fresh_browser 重开 OAuth 完成。
                         _handle_add_phone_challenge(
                             page, phone_callback,
                             device_id=device_id, user_agent=user_agent,
                             log=log, resume_url=oauth_start.auth_url,
-                            max_phone_attempts=max_phone_attempts,
+                            max_phone_attempts=1,
                         )
                         continue
                     except Exception as exc:
                         log(f"  短信验证失败，停止 OAuth 流程: {exc}")
+                        _escalate_phone_failure(phone_callback, exc, log)
                         return None
 
                 # 先尝试跳过 add_phone，直接重新访问 OAuth 授权 URL
@@ -2241,6 +2244,8 @@ def _do_codex_oauth(
             if error_text:
                 raise RuntimeError(f"OAuth 页面错误: {error_text[:300]}")
             time.sleep(0.5)
+    except (PhoneRestartRequired, PhoneReleaseUnconfirmed):
+        raise
     except Exception as e:
         log(f"  OAuth 异常: {e}")
         return None
@@ -2379,6 +2384,72 @@ def _is_invalid_phone_otp_response(result: dict) -> bool:
     return "invalid otp code" in text
 
 
+class PhoneRestartRequired(RuntimeError):
+    """手机号这一轮失败了，号码已确认取消：必须关掉浏览器、重新开始 Codex OAuth。"""
+
+
+class PhoneReleaseUnconfirmed(RuntimeError):
+    """号码取消没有得到确认：不能再租新号，否则可能重复计费。"""
+
+
+def _phone_failure_kind(exc: BaseException) -> str:
+    """把 add-phone 的失败分成 timeout / rotate / retry；空串表示不是换号类失败。"""
+    if isinstance(exc, (PhoneRestartRequired, PhoneReleaseUnconfirmed)):
+        return ""
+    if isinstance(exc, HeroSmsCodeTimeoutError):
+        return "timeout"
+    if not isinstance(exc, RuntimeError):
+        return ""
+    error_msg = str(exc)
+    error_lower = error_msg.lower()
+    whatsapp_send_failure = (
+        "couldn't send a text message" in error_lower
+        and "whatsapp" in error_lower
+    )
+    if "应当换号重试" in error_msg or whatsapp_send_failure:
+        return "rotate"
+    if (
+        "未获取到短信验证码" in error_msg
+        or "phone_number_in_use" in error_msg
+        or "already" in error_lower
+        or "in use" in error_lower
+    ):
+        return "retry"
+    return ""
+
+
+def _escalate_phone_failure(phone_callback, exc: BaseException, log) -> None:
+    """add-phone 单个号码失败后的收口：确认取消 → 需要时换国家 → 复位 → 要求重开 OAuth。
+
+    不是换号类失败时直接返回，由调用方按原来的方式处理。
+    是换号类失败时一定抛异常：
+      PhoneRestartRequired   号码已确认取消，可以重开 OAuth 换下一个号；
+      PhoneReleaseUnconfirmed 取消没确认，不许再租号；
+      RuntimeError           没有别的国家可换，停止。
+    """
+    failure_kind = _phone_failure_kind(exc)
+    if not failure_kind:
+        return
+    confirm_released = getattr(phone_callback, "confirm_released", None)
+    if not callable(confirm_released) or not confirm_released():
+        raise PhoneReleaseUnconfirmed(
+            f"手机号取消未确认，停止换号以免重复计费: {exc}"
+        ) from exc
+    if failure_kind == "rotate" and hasattr(phone_callback, "rotate_country"):
+        rotation = phone_callback.rotate_country()
+        if rotation is True:
+            log("手机号验证失败，已切换国家，下一次 OAuth 重新获取号码")
+        elif rotation is None:
+            log("手机号验证失败：国家库存查询失败，下一次 OAuth 沿用原国家")
+        else:
+            raise RuntimeError(
+                "手机号验证失败：没有可用的其他国家号码，停止重试"
+            ) from exc
+    if hasattr(phone_callback, "rearm"):
+        phone_callback.rearm()
+    raise PhoneRestartRequired(str(exc)) from exc
+
+
 def _handle_add_phone_challenge(
     page,
     phone_callback,
@@ -2430,25 +2501,10 @@ def _handle_add_phone_challenge(
             continue
         except RuntimeError as exc:
             last_error = exc
-            error_msg = str(exc)
             # 验证码超时或号码已被使用时换号重试，其他错误直接抛出
-            error_lower = error_msg.lower()
-            whatsapp_send_failure = (
-                "couldn't send a text message" in error_lower
-                and "whatsapp" in error_lower
-            )
-            should_rotate_country = (
-                "应当换号重试" in error_msg
-                or whatsapp_send_failure
-            )
-            should_retry = (
-                "未获取到短信验证码" in error_msg
-                or should_rotate_country
-                or "phone_number_in_use" in error_msg
-                or "already" in error_lower
-                or "in use" in error_lower
-            )
-            if not should_retry:
+            failure_kind = _phone_failure_kind(exc)
+            should_rotate_country = failure_kind == "rotate"
+            if not failure_kind:
                 raise
             log(f"⚠️ 手机号验证失败，准备换号重试...")
             # 取消当前号码
@@ -4227,7 +4283,7 @@ def _browser_registration_flow(
                     user_agent=user_agent,
                     log=log,
                     resume_url=f"{CHATGPT_APP}/",
-                    max_phone_attempts=max_phone_attempts,
+                    max_phone_attempts=1,
                 )
             continue
 
@@ -4242,7 +4298,7 @@ def _browser_registration_flow(
                 user_agent=user_agent,
                 log=log,
                 resume_url=f"{CHATGPT_APP}/",
-                max_phone_attempts=max_phone_attempts,
+                max_phone_attempts=1,
             )
             continue
 
@@ -4276,9 +4332,12 @@ class ChatGPTBrowserRegister:
         self.phone_callback = phone_callback
         self.log = log_fn
         self.max_phone_attempts = max(1, int(max_phone_attempts))
+        # 本次 run 还能用几个号码。每个号码对应一次 OAuth，号码不跨 OAuth 复用。
+        self._phone_numbers_left = self.max_phone_attempts
 
     def run(self, email: str, password: str, resume_stage: str = "") -> dict:
         account_created = resume_stage in RegistrationAttemptError.RESUMABLE_STAGES
+        self._phone_numbers_left = self.max_phone_attempts
         if account_created:
             # 本轮上一次尝试已经把账号建出来了。再走一遍注册入口就是拿老账号
             # 去注册：入口会把流程带进登录/验证码分支，而那条分支的每一步
@@ -4307,13 +4366,18 @@ class ChatGPTBrowserRegister:
                         progress=progress,
                     )
                 except Exception as exc:
-                    raise RegistrationAttemptError(
-                        str(exc) or exc.__class__.__name__,
-                        stage="signup_started",
-                        failure_stage=FAILURE_CREATED if progress.get("account_exists") else FAILURE_NOT_CREATED,
-                        email=email,
-                        password=password,
-                    ) from exc
+                    if not (progress.get("account_exists") and _phone_failure_kind(exc)):
+                        raise RegistrationAttemptError(
+                            str(exc) or exc.__class__.__name__,
+                            stage="signup_started",
+                            failure_stage=FAILURE_CREATED if progress.get("account_exists") else FAILURE_NOT_CREATED,
+                            email=email,
+                            password=password,
+                        ) from exc
+                    # 账号已建好、卡在注册阶段的手机号验证：同页换号走不下去，
+                    # 确认号码已取消后，交给下面全新浏览器的 Codex OAuth 继续。
+                    self._release_signup_phone(exc, email, password)
+                    final_state = {"page_type": "add_phone"}
                 account_created = True
                 self.log(f"注册流程完成: page={final_state.get('page_type') or '-'}")
 
@@ -4347,22 +4411,57 @@ class ChatGPTBrowserRegister:
             password=password,
         )
 
+    def _release_signup_phone(self, exc, email, password) -> None:
+        """注册阶段的号码失败：确认取消、占掉一个号码名额；不能继续时抛 RegistrationAttemptError。"""
+        self.log(f"注册阶段手机号验证失败，账号已建好，改由全新浏览器 Codex OAuth 继续: {exc}")
+        try:
+            _escalate_phone_failure(self.phone_callback, exc, self.log)
+            stop_exc = RuntimeError(str(exc) or exc.__class__.__name__)
+        except PhoneRestartRequired as restart:
+            self._phone_numbers_left -= 1
+            if self._phone_numbers_left > 0:
+                return
+            stop_exc = RuntimeError(f"手机号换号次数已用完: {restart}")
+        except Exception as other:
+            stop_exc = other
+        raise RegistrationAttemptError(
+            str(stop_exc) or stop_exc.__class__.__name__,
+            stage="account_created",
+            failure_stage=FAILURE_CREATED,
+            email=email,
+            password=password,
+        ) from stop_exc
+
     def _retry_oauth_fresh_browser(self, email, password):
-        """在全新浏览器 context 里做 Codex OAuth（绕过 add_phone session）。"""
+        """在全新浏览器 context 里做 Codex OAuth（绕过 add_phone session）。
+
+        手机号失败且号码已确认取消时，关掉这个浏览器、重新开始一次 OAuth。
+        每次 OAuth 只用一个号码，总号码数受 self._phone_numbers_left 限制。
+        """
         proxy = _build_proxy_config(self.proxy)
         launch_opts = {"headless": self.headless}
         if proxy:
             launch_opts["proxy"] = proxy
-        try:
-            with Camoufox(**launch_opts) as browser:
-                page = browser.new_page()
-                self.log("  全新浏览器 OAuth 开始...")
-                result = _do_codex_oauth(
-                    page, {}, email, password,
-                    self.otp_callback, self.phone_callback, self.proxy, self.log,
-                    self.max_phone_attempts,
+        while True:
+            try:
+                with Camoufox(**launch_opts) as browser:
+                    page = browser.new_page()
+                    self.log("  全新浏览器 OAuth 开始...")
+                    result = _do_codex_oauth(
+                        page, {}, email, password,
+                        self.otp_callback, self.phone_callback, self.proxy, self.log,
+                        self.max_phone_attempts,
+                    )
+                    return result
+            except PhoneRestartRequired as e:
+                self._phone_numbers_left -= 1
+                if self._phone_numbers_left <= 0:
+                    self.log(f"  手机号换号次数已用完，停止重新开始 OAuth: {e}")
+                    return None
+                self.log(
+                    f"  号码已确认取消，关闭浏览器并重新开始 Codex OAuth"
+                    f"（还可再换 {self._phone_numbers_left} 个号码）: {e}"
                 )
-                return result
-        except Exception as e:
-            self.log(f"  全新浏览器 OAuth 异常: {e}")
-            return None
+            except Exception as e:
+                self.log(f"  全新浏览器 OAuth 异常: {e}")
+                return None

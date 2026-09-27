@@ -440,6 +440,9 @@ class TestCreatePhoneCallbacks:
             def cancel(self, activation_id: str) -> bool:
                 return True
 
+            def is_cancelled(self, activation_id: str) -> bool:
+                return True
+
         provider = FakeProvider()
         monkeypatch.setattr("core.base_sms.create_sms_provider", lambda provider_key, config: provider)
         callback, cleanup = create_phone_callbacks(
@@ -471,6 +474,9 @@ class TestCreatePhoneCallbacks:
                 return SmsActivation(activation_id="act_auto_retry", phone_number="+66999999999")
 
             def cancel(self, activation_id: str) -> bool:
+                return True
+
+            def is_cancelled(self, activation_id: str) -> bool:
                 return True
 
         provider = FakeProvider()

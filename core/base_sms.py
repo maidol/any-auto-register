@@ -71,6 +71,10 @@ class BaseSmsProvider(ABC):
         """Cancel/release an activation. Returns True on success."""
         ...
 
+    def is_cancelled(self, activation_id: str) -> bool | None:
+        """查询 activation 是否已经是取消状态：True 已取消，False 没取消，None 查不了。"""
+        return None
+
     def report_success(self, activation_id: str) -> bool:
         """Report that the code was used successfully (optional)."""
         return True
@@ -212,6 +216,9 @@ class SmsActivateProvider(BaseSmsProvider):
         result = self._request("setStatus", id=activation_id, status="6")
         return "ACCESS" in result
 
+    def is_cancelled(self, activation_id: str) -> bool | None:
+        return self._request("getStatus", id=activation_id).strip() == "STATUS_CANCEL"
+
 
 # ---------------------------------------------------------------------------
 # HeroSMS implementation (https://hero-sms.com/stubs/handler_api.php)
@@ -271,6 +278,11 @@ def _safe_bool(value, default: bool) -> bool:
 
 PHONE_NUMBER_RETRY_ATTEMPTS = 3
 PHONE_NUMBER_RETRY_BACKOFF_SECONDS = 2
+# 取消号码之后要用状态查询确认。HeroSMS / SMS-Activate 在购买后 2 分钟内拒绝取消
+# （EARLY_CANCEL_DENIED），而「提交手机号失败」往往就发生在这 2 分钟里，
+# 所以要隔一段时间重试取消，总时长要盖过这 2 分钟：16 次 × 10 秒 = 160 秒。
+PHONE_RELEASE_VERIFY_ATTEMPTS = 16
+PHONE_RELEASE_VERIFY_INTERVAL_SECONDS = 10
 
 
 def _is_retryable_phone_acquisition_error(exc: Exception) -> bool:
@@ -880,6 +892,9 @@ class HeroSmsProvider(BaseSmsProvider):
     def get_status(self, activation_id: str) -> dict:
         return _parse_hero_status_text(self._request({"action": "getStatus", "id": activation_id}).text)
 
+    def is_cancelled(self, activation_id: str) -> bool | None:
+        return self.get_status(activation_id).get("status") == "cancel"
+
     def get_status_v2(self, activation_id: str) -> dict:
         resp = self._request({"action": "getStatusV2", "id": activation_id})
         text = resp.text.strip()
@@ -1252,6 +1267,9 @@ class PhoneCallbackController:
         self._failed_countries: set[str] = set()
         self._last_request_country = ""
         self._country_rotation_active = False
+        # 最近一次租到、还没成功用掉的号码。rearm / 超时会把 self.activation 清掉，
+        # 取消确认靠的是这一个，不是 self.activation。
+        self._last_activation_id = ""
 
     def _provider(self) -> BaseSmsProvider:
         if self.provider is None:
@@ -1396,6 +1414,7 @@ class PhoneCallbackController:
                 if last_exc is not None:
                     raise last_exc
                 raise RuntimeError("获取手机号失败")
+            self._last_activation_id = str(self.activation.activation_id)
             self.phase = "need_code"
             reused = bool((self.activation.metadata or {}).get("reused"))
             reuse_label = "复用号码" if reused else "新号码"
@@ -1458,6 +1477,7 @@ class PhoneCallbackController:
         if self.activation and self.provider and not self.completed:
             self.provider.report_success(self.activation.activation_id)
             self.completed = True
+            self._last_activation_id = ""
             self.phase = "done"
             self.awaiting_external_success = False
             self._reset_rotation_state()
@@ -1466,17 +1486,57 @@ class PhoneCallbackController:
             _HERO_SMS_VERIFY_LOCK.release()
             self._verify_lock_acquired = False
 
-    def cleanup(self) -> None:
-        if self.activation and not self.completed:
+    def confirm_released(self) -> bool:
+        """取消最近租的号码，并用状态查询确认它确实取消了。
+
+        成功用掉的号码（report_success 之后）不取消，直接返回 True。
+        返回 False 表示没能确认取消：调用方不得再租新号。
+        """
+        activation_id = self._last_activation_id
+        if not activation_id:
+            return True
+        provider = self._provider()
+        is_cancelled = getattr(provider, "is_cancelled", None)
+        for attempt in range(PHONE_RELEASE_VERIFY_ATTEMPTS):
             try:
-                provider = self._provider()
-                if self.awaiting_external_success and not getattr(provider, "auto_report_success_on_code", True):
-                    self.report_success()
-                else:
-                    provider.cancel(self.activation.activation_id)
-                    self.log(f"已释放未使用号码: activation_id={self.activation.activation_id}")
-            except Exception:
-                pass
+                provider.cancel(activation_id)
+            except Exception as exc:
+                self.log(f"取消号码请求失败({exc}): activation_id={activation_id}")
+            cancelled = None
+            if callable(is_cancelled):
+                try:
+                    cancelled = is_cancelled(activation_id)
+                except Exception as exc:
+                    self.log(f"查询号码取消状态失败({exc}): activation_id={activation_id}")
+                    cancelled = False
+            if cancelled is None:
+                self.log(f"已释放未使用号码: activation_id={activation_id}（接码平台不支持取消状态查询，未确认）")
+                return False
+            if cancelled:
+                self._last_activation_id = ""
+                self.log(f"已释放未使用号码并确认取消: activation_id={activation_id}")
+                return True
+            if attempt + 1 < PHONE_RELEASE_VERIFY_ATTEMPTS:
+                time.sleep(PHONE_RELEASE_VERIFY_INTERVAL_SECONDS)
+        self.log(
+            f"⚠️ 号码取消未确认: activation_id={activation_id}，"
+            f"已重试 {PHONE_RELEASE_VERIFY_ATTEMPTS} 次"
+        )
+        return False
+
+    def cleanup(self) -> None:
+        try:
+            if (
+                self.activation
+                and not self.completed
+                and self.awaiting_external_success
+                and not getattr(self._provider(), "auto_report_success_on_code", True)
+            ):
+                self.report_success()
+            elif self._last_activation_id:
+                self.confirm_released()
+        except Exception:
+            pass
         if self._verify_lock_acquired:
             _HERO_SMS_VERIFY_LOCK.release()
             self._verify_lock_acquired = False
