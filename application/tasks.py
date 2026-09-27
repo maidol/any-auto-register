@@ -17,7 +17,17 @@ from core.account_graph import (
 )
 from core.base_platform import AccountStatus, RegisterConfig
 from core.datetime_utils import format_local_clock, serialize_datetime
-from core.db import AccountModel, TaskEventModel, TaskLog, TaskModel, engine, save_account, save_failed_account
+from core.db import (
+    AccountModel,
+    TaskEventModel,
+    TaskLog,
+    TaskModel,
+    engine,
+    list_reusable_failed_accounts,
+    mark_failed_account_reused,
+    save_account,
+    save_failed_account,
+)
 from core.log_sanitizer import sanitize_text, sanitize_value
 from core.platform_accounts import build_platform_account
 from core.registry import get
@@ -51,6 +61,49 @@ ACTIVE_TASK_STATUSES = {
 
 _task_locks: dict[str, threading.Lock] = {}
 _task_locks_guard = threading.Lock()
+
+# 正在被某个账号周期复用的注册失败账号：(platform, email)。
+# 任务是同一个进程里的多个线程，进程内一把锁就够；进程重启后集合清空，不会有永远占着的行。
+_reused_failed_accounts: set[tuple[str, str]] = set()
+_reused_failed_accounts_guard = threading.Lock()
+
+
+def _claim_failed_account(platform_name: str, mailbox, mail_provider: str, skip: set,
+                          *, created_ok: bool = False) -> dict | None:
+    """挑一条能复用的注册失败账号并占住它；没有就返回 None。
+
+    只要邮箱 provider 读得到收件箱的：失败行记下的 provider 要么为空（老数据），
+    要么就是当前这个；并且当前 provider 说它能按地址读这个邮箱。
+    skip 是本任务已经复用过的邮箱，同一个任务里不再挑第二次。
+    created_ok 为假时不挑「已在 ChatGPT 建过号」的行：只有浏览器执行器续做得了 Codex OAuth。
+    """
+    from core.registration.errors import FAILURE_CREATED, FAILURE_OAUTH
+
+    can_read = getattr(mailbox, "can_read_address", None)
+    if not callable(can_read):
+        return None
+    for row in list_reusable_failed_accounts(platform_name):
+        if row["email"] in skip:
+            continue
+        if not created_ok and row["failure_stage"] in (FAILURE_CREATED, FAILURE_OAUTH):
+            continue
+        if row["mail_provider"] not in ("", mail_provider):
+            continue
+        if not can_read(row["email"]):
+            continue
+        key = (platform_name, row["email"])
+        with _reused_failed_accounts_guard:
+            if key in _reused_failed_accounts:
+                continue
+            _reused_failed_accounts.add(key)
+        mark_failed_account_reused(platform_name, row["email"])
+        return row
+    return None
+
+
+def _release_failed_account(platform_name: str, email: str) -> None:
+    with _reused_failed_accounts_guard:
+        _reused_failed_accounts.discard((platform_name, email))
 
 
 def _utcnow() -> datetime:
@@ -759,9 +812,14 @@ def _build_proxy_snapshot(pool, size: int) -> list[str]:
 def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
     from dataclasses import replace
 
-    from core.base_mailbox import PinnedMailbox
+    from core.base_mailbox import MailboxAccount, PinnedMailbox
     from core.proxy_pool import proxy_pool
-    from core.registration.errors import FAILURE_UNKNOWN, RegistrationAttemptError
+    from core.registration.errors import (
+        FAILURE_CREATED,
+        FAILURE_OAUTH,
+        FAILURE_UNKNOWN,
+        RegistrationAttemptError,
+    )
     from core.registration.strategy import (
         CANCELLED,
         COMPLETED,
@@ -856,7 +914,7 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
     if allocator.snapshot:
         logger.log(f"本次任务代理快照: {len(allocator.snapshot)} 个")
 
-    state = {"saved": 0, "index_offset": 0}
+    state = {"saved": 0, "index_offset": 0, "reused": set(), "created_noted": False}
 
     # —— 账号周期的身份与生命周期边界（需求 1d + 需求 4）——
     # 「轮」在调度内核里是有的，在这一层原本没有：每次尝试都新造一个 platform，
@@ -864,7 +922,7 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
     # 认周期起点，是因为 AccountCycleRunner 的 cleanup 钩子是每次尝试调的，
     # 而 index 在 HeroSMS 补单那几个 runner 里会从 0 重新开始。
     # password 与 mailbox 同寿命：一轮 = 一对凭据。
-    cycle: dict[str, Any] = {"mailbox": None, "open": False, "password": None, "resume": None}
+    cycle: dict[str, Any] = {"mailbox": None, "open": False, "password": None, "resume": None, "reused": ""}
 
     def _close_cycle() -> None:
         """结束当前周期：丢掉钉住的邮箱，按开关拆掉 provider 侧浏览器。"""
@@ -874,6 +932,9 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
         cycle["mailbox"] = None
         cycle["password"] = None
         cycle["resume"] = None
+        if cycle["reused"]:
+            _release_failed_account(platform_name, cycle["reused"])
+            cycle["reused"] = ""
         if shared_mailbox is None or not strategy.clean_browser_context:
             return
         close = getattr(shared_mailbox, "close", None)
@@ -888,6 +949,39 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
         _close_cycle()
         cycle["mailbox"] = PinnedMailbox(shared_mailbox) if shared_mailbox is not None else None
         cycle["open"] = True
+        # 需求 20260926 第 2 条：账号列表里有注册失败的账号，就先复用它的邮箱和密码。
+        # 已经在 ChatGPT 建过号的直接续做 Codex OAuth，没建过的走完整注册。
+        if platform_name != "chatgpt" or email or shared_mailbox is None:
+            return
+        # registration_resume 只有浏览器适配器读；protocol 拿到已建号的邮箱会重进注册，
+        # 然后因为没有 create_account 的 callback 失败，碰到 add_phone 也直接 raise。
+        executor_type = str(payload.get("executor_type", "protocol") or "protocol")
+        created_ok = executor_type in ("headless", "headed")
+        row = _claim_failed_account(
+            platform_name, shared_mailbox, str(extra.get("mail_provider") or ""), state["reused"],
+            created_ok=created_ok,
+        )
+        if not created_ok and not state["created_noted"]:
+            state["created_noted"] = True
+            if any(r["failure_stage"] in (FAILURE_CREATED, FAILURE_OAUTH)
+                   for r in list_reusable_failed_accounts(platform_name)):
+                logger.log(
+                    f"{executor_type} 执行器不能续做 Codex OAuth："
+                    "已在 ChatGPT 建过号的注册失败账号不复用，留给 headless/headed 任务"
+                )
+        if row is None:
+            return
+        state["reused"].add(row["email"])
+        cycle["reused"] = row["email"]
+        cycle["mailbox"] = PinnedMailbox(shared_mailbox, pinned=MailboxAccount(email=row["email"]))
+        cycle["password"] = row["password"]
+        created = row["failure_stage"] in (FAILURE_CREATED, FAILURE_OAUTH)
+        if created:
+            cycle["resume"] = {"stage": "account_created", "email": row["email"]}
+        logger.log(
+            f"复用注册失败账号 {row['email']}（{row['failure_stage'] or '-'}）："
+            + ("已在 ChatGPT 建过号，直接做 Codex OAuth" if created else "还没建号，走完整注册")
+        )
 
     def _keep_failed_account(exc: Exception, error: str) -> None:
         """这次尝试失败了：把这对凭据落成一条「注册失败」账号。
@@ -899,6 +993,8 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
         if not failed_email:
             logger.log("本次尝试还没拿到邮箱，不记录失败账号", level="warning")
             return
+        # 启用了多个邮箱 provider 时，地址可能是回退的那个开的；配置里的只是主 provider。
+        opened_by = cycle["mailbox"].pinned_provider_key if pinned and pinned == failed_email else ""
         try:
             save_failed_account(
                 platform_name,
@@ -906,6 +1002,7 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
                 getattr(exc, "password", "") or cycle["password"] or "",
                 failure_stage=getattr(exc, "failure_stage", "") or FAILURE_UNKNOWN,
                 failure_reason=error,
+                mail_provider=opened_by or str(extra.get("mail_provider") or ""),
             )
         except Exception as save_exc:
             logger.log(f"失败账号落库失败（不影响本次结果）: {save_exc}", level="warning")

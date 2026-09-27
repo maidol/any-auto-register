@@ -1270,6 +1270,9 @@ class PhoneCallbackController:
         # 最近一次租到、还没成功用掉的号码。rearm / 超时会把 self.activation 清掉，
         # 取消确认靠的是这一个，不是 self.activation。
         self._last_activation_id = ""
+        # 确认预算已经用完、仍没确认取消的那个号。同一个号只确认一轮：
+        # handler 内 cleanup、escalate、任务收尾 cleanup 都会来问，每处都重跑一轮就是三轮。
+        self._unconfirmed_activation_id = ""
 
     def _provider(self) -> BaseSmsProvider:
         if self.provider is None:
@@ -1495,6 +1498,8 @@ class PhoneCallbackController:
         activation_id = self._last_activation_id
         if not activation_id:
             return True
+        if activation_id == self._unconfirmed_activation_id:
+            return False
         provider = self._provider()
         is_cancelled = getattr(provider, "is_cancelled", None)
         for attempt in range(PHONE_RELEASE_VERIFY_ATTEMPTS):
@@ -1518,6 +1523,7 @@ class PhoneCallbackController:
                 return True
             if attempt + 1 < PHONE_RELEASE_VERIFY_ATTEMPTS:
                 time.sleep(PHONE_RELEASE_VERIFY_INTERVAL_SECONDS)
+        self._unconfirmed_activation_id = activation_id
         self.log(
             f"⚠️ 号码取消未确认: activation_id={activation_id}，"
             f"已重试 {PHONE_RELEASE_VERIFY_ATTEMPTS} 次"

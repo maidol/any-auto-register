@@ -151,9 +151,10 @@ class PinnedMailbox(BaseMailbox):
     地板，必须停在本次尝试开始那一刻。
     """
 
-    def __init__(self, wrapped: BaseMailbox) -> None:
+    def __init__(self, wrapped: BaseMailbox, pinned: MailboxAccount | None = None) -> None:
         self.wrapped = wrapped
-        self._pinned: MailboxAccount | None = None
+        # 给了 pinned 就直接钉在这个已有地址上（复用注册失败账号的邮箱），不再开新地址。
+        self._pinned: MailboxAccount | None = pinned
 
     def get_email(self) -> MailboxAccount:
         if self._pinned is None:
@@ -164,6 +165,13 @@ class PinnedMailbox(BaseMailbox):
     def pinned_email(self) -> str:
         """本周期已经拿到的邮箱；还没拿过就是空串。只读，不会去开新地址。"""
         return self._pinned.email if self._pinned is not None else ""
+
+    @property
+    def pinned_provider_key(self) -> str:
+        """实际开出这个地址的 provider（FallbackMailbox 写在 extra 里）；不知道就是空串。只读。"""
+        if self._pinned is None:
+            return ""
+        return str((self._pinned.extra or {}).get("mailbox_provider_key") or "")
 
     def get_current_ids(self, account: MailboxAccount) -> set:
         return self.wrapped.get_current_ids(account)
@@ -1182,6 +1190,14 @@ class CFWorkerMailbox(BaseMailbox):
         if self.fingerprint:
             h["x-fingerprint"] = self.fingerprint
         return h
+
+    def can_read_address(self, email: str) -> bool:
+        """admin 接口按地址读信（见 _get_mails），本域名下任何一个老地址的收件箱都读得到。
+
+        没配域名时判断不了这个地址归不归这个 worker，一律返回 False。
+        """
+        domain = str(self.domain or "").strip().lower()
+        return bool(domain) and str(email or "").strip().lower().endswith("@" + domain)
 
     def get_email(self) -> MailboxAccount:
         import requests, random, string
