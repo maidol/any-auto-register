@@ -845,7 +845,7 @@ def sync_account_graph(session: Session, model: AccountModel) -> None:
     )
 
 
-FAILURE_OVERVIEW_KEYS = ("failure_stage", "failure_reason", "failed_at")
+FAILURE_OVERVIEW_KEYS = ("failure_stage", "failure_reason", "failed_at", "mail_provider", "reuse_attempts")
 
 
 def _drop_failure_markers(summary: dict[str, Any]) -> None:

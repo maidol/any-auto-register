@@ -341,6 +341,7 @@ def save_failed_account(
     *,
     failure_stage: str,
     failure_reason: str,
+    mail_provider: str = "",
 ) -> bool:
     """注册失败也落一行「注册失败」账号，让这对凭据在账号列表里看得见。
 
@@ -371,9 +372,76 @@ def save_failed_account(
             "failure_stage": failure_stage,
             "failure_reason": str(failure_reason or "")[:500],
             "failed_at": _utcnow().isoformat(),
+            **({"mail_provider": mail_provider} if mail_provider else {}),
         }},
     ))
     return True
+
+
+#: 一个注册失败的账号最多被自动复用几次。每次复用都可能再花一次接码费，
+#: 邮箱本身出了问题（比如被平台封了）时不能无限重来。
+FAILED_ACCOUNT_REUSE_MAX = 3
+
+
+def list_reusable_failed_accounts(platform: str) -> list[dict]:
+    """列出还能复用的注册失败账号，最早落库的排在前面。
+
+    每项有 email / password / failure_stage / mail_provider。
+    没有密码的、复用次数已经用完的不返回。
+    """
+    from core.account_graph import load_account_graphs
+    from core.base_platform import AccountStatus
+
+    with Session(engine) as session:
+        models = session.exec(
+            select(AccountModel)
+            .join(AccountOverviewModel, AccountOverviewModel.account_id == AccountModel.id)
+            .where(AccountModel.platform == platform)
+            .where(AccountOverviewModel.lifecycle_status == AccountStatus.FAILED.value)
+            .order_by(AccountModel.id)
+        ).all()
+        graphs = load_account_graphs(session, [int(model.id) for model in models])
+    rows = []
+    for model in models:
+        overview = graphs.get(int(model.id), {}).get("overview") or {}
+        if not model.password:
+            continue
+        if int(overview.get("reuse_attempts") or 0) >= FAILED_ACCOUNT_REUSE_MAX:
+            continue
+        rows.append({
+            "email": model.email,
+            "password": model.password,
+            "failure_stage": str(overview.get("failure_stage") or ""),
+            "mail_provider": str(overview.get("mail_provider") or ""),
+        })
+    return rows
+
+
+def mark_failed_account_reused(platform: str, email: str) -> None:
+    """复用次数加一。认领的那一刻就写，任务中途被杀也算用掉了一次。"""
+    from core.account_graph import load_account_graphs
+    from core.base_platform import Account, AccountStatus
+
+    with Session(engine) as session:
+        model = session.exec(
+            select(AccountModel)
+            .where(AccountModel.platform == platform)
+            .where(AccountModel.email == email)
+        ).first()
+        if model is None:
+            return
+        graph = load_account_graphs(session, [int(model.id)]).get(int(model.id), {})
+        if graph.get("lifecycle_status") != AccountStatus.FAILED.value:
+            return
+        attempts = int((graph.get("overview") or {}).get("reuse_attempts") or 0) + 1
+        password = model.password
+    save_account(Account(
+        platform=platform,
+        email=email,
+        password=password,
+        status=AccountStatus.FAILED,
+        extra={"account_overview": {"reuse_attempts": attempts}},
+    ))
 
 
 LEGACY_ACCOUNT_COLUMNS = (
