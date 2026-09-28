@@ -210,6 +210,7 @@ function RegisterModal({
   const [retryInterval, setRetryInterval] = useState(0)
   const [accountInterval, setAccountInterval] = useState(0)
   const [phoneRetryCount, setPhoneRetryCount] = useState(2)
+  const [proxyMode, setProxyMode] = useState('pool')
   const [selection, setSelection] = useState({
     identityProvider: '',
     oauthProvider: '',
@@ -353,6 +354,7 @@ function RegisterModal({
           retry_interval_seconds: retryInterval,
           account_interval_seconds: accountInterval,
           phone_retry_count: phoneRetryCount,
+          proxy_mode: proxyMode,
           executor_type: selection.executorType,
           captcha_solver: 'auto',
           proxy: null,
@@ -446,6 +448,18 @@ function RegisterModal({
                       )
                     })}
                   </div>
+                </div>
+
+                <div>
+                  <label className="text-xs text-[var(--text-muted)] block mb-1">代理来源</label>
+                  <select
+                    value={proxyMode}
+                    onChange={e => setProxyMode(e.target.value)}
+                    className="control-surface control-surface-compact w-full"
+                  >
+                    <option value="pool">普通代理池</option>
+                    <option value="openvpn">VPN Gate OpenVPN</option>
+                  </select>
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
