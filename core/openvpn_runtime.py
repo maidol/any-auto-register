@@ -71,7 +71,7 @@ class MihomoRuntimeManager:
         start_timeout: float = 20,
         health_url: str = "https://www.gstatic.com/generate_204",
         health_timeout: float = 20,
-        max_candidates: int | None = None,
+        max_candidates: int | None = 5,
         process_factory: Callable[..., subprocess.Popen] = subprocess.Popen,
         controller_factory: Callable[..., object] | None = None,
         health_checker: Callable[[str], bool] | None = None,
@@ -85,7 +85,13 @@ class MihomoRuntimeManager:
         self.start_timeout = float(start_timeout)
         self.health_url = health_url
         self.health_timeout = float(health_timeout)
-        self.max_candidates = None if max_candidates is None else max(int(max_candidates), 1)
+        if max_candidates is None:
+            self.max_candidates = None
+        else:
+            max_candidates = int(max_candidates)
+            if max_candidates < 0:
+                raise ValueError("max_candidates must be zero or a positive integer")
+            self.max_candidates = None if max_candidates == 0 else max_candidates
         self.process_factory = process_factory
         self.controller_factory = controller_factory or (lambda address, secret: _HttpController(address, secret))
         self.health_checker = health_checker or self._default_health_checker
