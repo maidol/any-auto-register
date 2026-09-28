@@ -38,4 +38,8 @@ class OpenVPNProxiesService:
             "fail_count": record.fail_count,
             "is_active": record.is_active,
             "last_checked": record.last_checked,
+            "source": record.source,
+            "refresh_healthy": record.refresh_healthy,
+            "last_seen_at": record.last_seen_at,
+            "last_refresh_checked_at": record.last_refresh_checked_at,
         }

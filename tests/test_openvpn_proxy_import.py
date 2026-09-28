@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 import yaml
 from sqlalchemy import inspect
@@ -9,6 +11,7 @@ from core import db
 from core.db import OpenVPNProxyModel, engine
 from core.openvpn_config import parse_mihomo_openvpn_yaml
 from infrastructure.openvpn_proxies_repository import OpenVPNProxiesRepository
+from domain.openvpn_proxies import openvpn_proxy_identity
 
 
 VALID_ENTRY = {
@@ -114,6 +117,25 @@ def test_import_is_idempotent_and_keeps_private_config_out_of_metadata():
         assert "PRIVATE KEY" in stored.mihomo_config_json
 
 
+def test_manual_reimport_reclaims_vpngate_identity():
+    repo = OpenVPNProxiesRepository()
+    repo.import_entries([VALID_ENTRY])
+    with Session(engine) as session:
+        item = session.exec(select(OpenVPNProxyModel)).one()
+        item.source = "vpngate"
+        item.refresh_healthy = True
+        session.add(item)
+        session.commit()
+
+    repo.import_entries([VALID_ENTRY], region="US")
+
+    with Session(engine) as session:
+        item = session.exec(select(OpenVPNProxyModel)).one()
+    assert item.source == "manual"
+    assert item.refresh_healthy is None
+    assert item.region == "US"
+
+
 def test_reimport_updates_region_for_same_identity():
     repo = OpenVPNProxiesRepository()
 
@@ -196,6 +218,10 @@ def test_legacy_duplicate_identities_converge_when_init_db_runs_twice(monkeypatc
     assert items[0].success_count == 6
     assert items[0].fail_count == 8
     assert items[0].is_active is False
+    assert items[0].source == "manual"
+    assert items[0].refresh_healthy is None
+    assert items[0].last_seen_at is None
+    assert items[0].last_refresh_checked_at is None
     assert items[0].identity
     indexes = inspect(migration_engine).get_indexes("openvpn_proxies")
     assert any(index["name"] == "uq_openvpn_proxies_identity" and index["unique"] for index in indexes)
@@ -232,3 +258,66 @@ def test_openvpn_list_does_not_return_private_material(client):
     assert items[0]["name"] == VALID_ENTRY["name"]
     assert "key" not in items[0]
     assert "mihomo_config_json" not in items[0]
+
+
+def test_manual_import_marks_source_manual():
+    repo = OpenVPNProxiesRepository()
+
+    repo.import_entries([VALID_ENTRY])
+
+    with Session(engine) as session:
+        item = session.exec(select(OpenVPNProxyModel)).one()
+
+    assert item.source == "manual"
+    assert item.refresh_healthy is None
+
+
+def test_active_runtime_records_filters_unhealthy_vpngate_without_reactivating_nodes():
+    manual = OpenVPNProxyModel(
+        name="manual",
+        server="198.51.100.20",
+        port=443,
+        identity=openvpn_proxy_identity("manual", "198.51.100.20", 443),
+        proto="tcp",
+        mihomo_config_json=json.dumps({**VALID_ENTRY, "name": "manual"}),
+        source="manual",
+        refresh_healthy=None,
+    )
+    healthy = OpenVPNProxyModel(
+        name="healthy",
+        server="198.51.100.21",
+        port=443,
+        identity=openvpn_proxy_identity("healthy", "198.51.100.21", 443),
+        proto="tcp",
+        mihomo_config_json=json.dumps({**VALID_ENTRY, "name": "healthy"}),
+        source="vpngate",
+        refresh_healthy=True,
+    )
+    unhealthy = OpenVPNProxyModel(
+        name="unhealthy",
+        server="198.51.100.22",
+        port=443,
+        identity=openvpn_proxy_identity("unhealthy", "198.51.100.22", 443),
+        proto="tcp",
+        mihomo_config_json=json.dumps({**VALID_ENTRY, "name": "unhealthy"}),
+        source="vpngate",
+        refresh_healthy=False,
+    )
+    disabled = OpenVPNProxyModel(
+        name="disabled",
+        server="198.51.100.23",
+        port=443,
+        identity=openvpn_proxy_identity("disabled", "198.51.100.23", 443),
+        proto="tcp",
+        mihomo_config_json=json.dumps({**VALID_ENTRY, "name": "disabled"}),
+        source="vpngate",
+        refresh_healthy=True,
+        is_active=False,
+    )
+    with Session(engine) as session:
+        session.add_all([manual, healthy, unhealthy, disabled])
+        session.commit()
+
+    records = OpenVPNProxiesRepository().active_runtime_records()
+
+    assert {record.name for record in records} == {"manual", "healthy"}

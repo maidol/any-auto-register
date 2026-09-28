@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlmodel import Session, select
 
-from core.db import OpenVPNProxyModel, engine
+from core.db import OpenVPNProxyModel, OpenVPNRefreshRunModel, engine
 from domain.openvpn_proxies import (
     OpenVPNImportSummary,
     OpenVPNProxyRecord,
@@ -29,6 +29,10 @@ def _to_metadata(model: OpenVPNProxyModel) -> OpenVPNProxyRecord:
         fail_count=model.fail_count,
         is_active=bool(model.is_active),
         last_checked=model.last_checked,
+        source=model.source,
+        refresh_healthy=model.refresh_healthy,
+        last_seen_at=model.last_seen_at,
+        last_refresh_checked_at=model.last_refresh_checked_at,
     )
 
 
@@ -56,8 +60,10 @@ class OpenVPNProxiesRepository:
                     .where(OpenVPNProxyModel.identity == identity)
                 ).first()
                 if existing:
+                    reclaim_refresh_ownership = existing.source == "vpngate"
                     unchanged = (
-                        existing.name == name
+                        not reclaim_refresh_ownership
+                        and existing.name == name
                         and existing.server == server
                         and existing.port == port
                         and existing.proto == proto
@@ -73,6 +79,10 @@ class OpenVPNProxiesRepository:
                     existing.proto = proto
                     existing.mihomo_config_json = config_json
                     existing.region = region
+                    existing.source = "manual"
+                    existing.refresh_healthy = None
+                    existing.last_seen_at = None
+                    existing.last_refresh_checked_at = None
                     session.add(existing)
                     summary.updated += 1
                     continue
@@ -84,6 +94,7 @@ class OpenVPNProxiesRepository:
                     proto=proto,
                     mihomo_config_json=config_json,
                     region=region,
+                    source="manual",
                 )
                 session.execute(
                     insert_stmt.on_conflict_do_update(
@@ -95,12 +106,222 @@ class OpenVPNProxiesRepository:
                             "proto": insert_stmt.excluded.proto,
                             "mihomo_config_json": insert_stmt.excluded.mihomo_config_json,
                             "region": insert_stmt.excluded.region,
+                            "source": "manual",
+                            "refresh_healthy": None,
+                            "last_seen_at": None,
+                            "last_refresh_checked_at": None,
                         },
                     )
                 )
                 summary.added += 1
             session.commit()
         return summary
+
+    def begin_refresh_run(self, scheduled_for: str, source: str, attempt_number: int) -> int:
+        run = OpenVPNRefreshRunModel(
+            scheduled_for=scheduled_for,
+            source=source,
+            attempt_number=int(attempt_number),
+        )
+        with Session(engine) as session:
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+        return int(run.id or 0)
+
+    def mark_interrupted_refresh_runs(self) -> int:
+        updated = 0
+        with Session(engine) as session:
+            runs = session.exec(
+                select(OpenVPNRefreshRunModel).where(OpenVPNRefreshRunModel.status == "running")
+            ).all()
+            for run in runs:
+                run.status = "interrupted"
+                run.finished_at = datetime.now(timezone.utc)
+                session.add(run)
+                updated += 1
+            session.commit()
+        try:
+            self._prune_refresh_runs()
+        except Exception:
+            pass
+        return updated
+
+    def refresh_attempt_count(self, scheduled_for: str) -> int:
+        with Session(engine) as session:
+            return len(
+                session.exec(
+                    select(OpenVPNRefreshRunModel).where(
+                        OpenVPNRefreshRunModel.scheduled_for == scheduled_for
+                    )
+                ).all()
+            )
+
+    def refresh_succeeded(self, scheduled_for: str) -> bool:
+        with Session(engine) as session:
+            return session.exec(
+                select(OpenVPNRefreshRunModel).where(
+                    OpenVPNRefreshRunModel.scheduled_for == scheduled_for,
+                    OpenVPNRefreshRunModel.status == "success",
+                )
+            ).first() is not None
+
+    def finish_refresh_run(
+        self,
+        run_id: int,
+        *,
+        status: str,
+        snapshot_hash: str = "",
+        source_row_count: int = 0,
+        convertible_count: int = 0,
+        checked_count: int = 0,
+        healthy_count: int = 0,
+        failures: list[dict[str, object]] | None = None,
+    ) -> None:
+        with Session(engine) as session:
+            run = session.get(OpenVPNRefreshRunModel, run_id)
+            if not run:
+                return
+            run.status = status
+            run.finished_at = datetime.now(timezone.utc)
+            run.snapshot_hash = snapshot_hash
+            run.source_row_count = int(source_row_count)
+            run.convertible_count = int(convertible_count)
+            run.checked_count = int(checked_count)
+            run.healthy_count = int(healthy_count)
+            run.failure_count = len(failures or [])
+            run.failures_json = json.dumps(failures or [], ensure_ascii=False)
+            session.add(run)
+            session.commit()
+        try:
+            self._prune_refresh_runs()
+        except Exception:
+            pass
+
+    def manual_identity_collisions(self, identities: list[str]) -> list[dict[str, object]]:
+        if not identities:
+            return []
+        with Session(engine) as session:
+            rows = session.exec(
+                select(OpenVPNProxyModel).where(
+                    OpenVPNProxyModel.identity.in_(identities),
+                    OpenVPNProxyModel.source != "vpngate",
+                )
+            ).all()
+        return [
+            {"identity": item.identity, "reason": "manual_identity_collision"}
+            for item in rows
+        ]
+
+    def commit_refresh(
+        self,
+        run_id: int,
+        outcomes: list[dict[str, object]],
+        *,
+        checked_at: datetime,
+        snapshot_hash: str,
+        source_row_count: int,
+        convertible_count: int,
+        failures: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        collision_failures: list[dict[str, object]] = []
+        seen_identities: set[str] = set()
+        with Session(engine) as session:
+            for outcome in outcomes:
+                entry = dict(outcome["entry"])
+                identity = str(outcome["identity"])
+                healthy = bool(outcome["healthy"])
+                region = str(outcome.get("region") or "")
+                seen_identities.add(identity)
+                config_json = json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
+                existing = session.exec(
+                    select(OpenVPNProxyModel).where(OpenVPNProxyModel.identity == identity)
+                ).first()
+                if existing is not None and existing.source != "vpngate":
+                    collision_failures.append(
+                        {
+                            "identity": identity,
+                            "reason": "manual_identity_collision",
+                        }
+                    )
+                    continue
+                if existing is None:
+                    existing = OpenVPNProxyModel(
+                        name=str(entry["name"]),
+                        server=str(entry["server"]),
+                        port=int(entry["port"]),
+                        identity=identity,
+                        proto=str(entry.get("proto") or "udp"),
+                        mihomo_config_json=config_json,
+                        region=region,
+                        source="vpngate",
+                        refresh_healthy=healthy,
+                        last_seen_at=checked_at,
+                        last_refresh_checked_at=checked_at,
+                    )
+                else:
+                    existing.name = str(entry["name"])
+                    existing.server = str(entry["server"])
+                    existing.port = int(entry["port"])
+                    existing.proto = str(entry.get("proto") or "udp")
+                    existing.mihomo_config_json = config_json
+                    existing.region = region
+                    existing.refresh_healthy = healthy
+                    existing.last_seen_at = checked_at
+                    existing.last_refresh_checked_at = checked_at
+                session.add(existing)
+
+            old_vpngate = session.exec(
+                select(OpenVPNProxyModel).where(OpenVPNProxyModel.source == "vpngate")
+            ).all()
+            for item in old_vpngate:
+                identity = openvpn_proxy_identity(item.name, item.server, item.port)
+                if identity not in seen_identities:
+                    item.refresh_healthy = False
+                    item.last_refresh_checked_at = checked_at
+                    session.add(item)
+
+            run = session.get(OpenVPNRefreshRunModel, run_id)
+            if run is None:
+                raise RuntimeError("OpenVPN refresh audit run is missing")
+            all_failures = list(failures) + collision_failures
+            run.status = "success"
+            run.finished_at = datetime.now(timezone.utc)
+            run.snapshot_hash = snapshot_hash
+            run.source_row_count = int(source_row_count)
+            run.convertible_count = int(convertible_count)
+            run.checked_count = len(outcomes)
+            run.healthy_count = sum(1 for item in outcomes if item["healthy"])
+            run.failure_count = len(all_failures)
+            run.failures_json = json.dumps(all_failures, ensure_ascii=False)
+            session.add(run)
+            session.commit()
+        try:
+            self._prune_refresh_runs()
+        except Exception:
+            pass
+        return collision_failures
+
+    def list_refresh_runs(self, limit: int = 30) -> list[OpenVPNRefreshRunModel]:
+        with Session(engine) as session:
+            return list(
+                session.exec(
+                    select(OpenVPNRefreshRunModel)
+                    .order_by(OpenVPNRefreshRunModel.id.desc())
+                    .limit(int(limit))
+                ).all()
+            )
+
+    def _prune_refresh_runs(self, keep: int = 30) -> None:
+        with Session(engine) as session:
+            runs = list(
+                session.exec(
+                    select(OpenVPNRefreshRunModel).order_by(OpenVPNRefreshRunModel.id.desc())
+                ).all()
+            )
+            for run in runs[int(keep) :]:
+                session.delete(run)
+            session.commit()
 
     def list_metadata(self, region: str = "") -> list[OpenVPNProxyRecord]:
         with Session(engine) as session:
@@ -115,6 +336,10 @@ class OpenVPNProxiesRepository:
             statement = (
                 select(OpenVPNProxyModel)
                 .where(OpenVPNProxyModel.is_active == True)
+                .where(
+                    (OpenVPNProxyModel.source != "vpngate")
+                    | (OpenVPNProxyModel.refresh_healthy == True)
+                )
                 .order_by(OpenVPNProxyModel.id.desc())
             )
             if region:

@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from application.openvpn_proxies import OpenVPNProxiesService
+from application.openvpn_refresh import RefreshBusyError, openvpn_refresh_service
 from application.proxies import ProxiesService
 from domain.proxies import ProxyBulkCreateCommand, ProxyCreateCommand
 
@@ -71,6 +72,21 @@ def toggle_openvpn_proxy(proxy_id: int):
     if value is None:
         raise HTTPException(404, "OpenVPN 代理不存在")
     return {"is_active": value}
+
+
+@router.post("/openvpn/refresh")
+def refresh_openvpn_proxies():
+    try:
+        return openvpn_refresh_service.refresh_once()
+    except RefreshBusyError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.get("/openvpn/refresh/runs")
+def list_openvpn_refresh_runs(limit: int = 30):
+    if not 1 <= limit <= 30:
+        raise HTTPException(400, "limit must be between 1 and 30")
+    return openvpn_refresh_service.list_runs(limit)
 
 
 @router.delete("/{proxy_id}")

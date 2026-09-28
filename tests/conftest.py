@@ -13,6 +13,7 @@ _tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 _tmp.close()
 _TEST_DB_PATH = _tmp.name
 os.environ["ACCOUNT_MANAGER_DATABASE_URL"] = f"sqlite:///{_TEST_DB_PATH}"
+os.environ["VPN_GATE_REFRESH_ENABLED"] = "0"
 
 import pytest
 from sqlmodel import SQLModel, create_engine

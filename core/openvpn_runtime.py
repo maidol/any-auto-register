@@ -15,7 +15,11 @@ from typing import Callable, Iterable
 import requests
 
 from core.openvpn_config import render_single_openvpn_config
-from domain.openvpn_proxies import OpenVPNProxyRuntimeRecord, openvpn_proxy_identity
+from domain.openvpn_proxies import (
+    OpenVPNProbeResult,
+    OpenVPNProxyRuntimeRecord,
+    openvpn_proxy_identity,
+)
 
 
 class MihomoRuntimeError(RuntimeError):
@@ -209,6 +213,47 @@ class MihomoRuntimeManager:
             self._selected = profile
             return profile
         raise MihomoRuntimeError("all OpenVPN profiles failed health checks")
+
+    def probe_all(self) -> list[OpenVPNProbeResult]:
+        """Health-check every profile without changing task statistics."""
+        if self.process is None or self.controller is None:
+            raise MihomoRuntimeError("Mihomo runtime is not started")
+
+        results: list[OpenVPNProbeResult] = []
+        for profile in self.profiles:
+            if self.process.poll() is not None:
+                raise MihomoRuntimeError("Mihomo exited while probing OpenVPN nodes")
+            runtime_name = self._runtime_names.get(profile.id, profile.name)
+            try:
+                self.controller.select("VPNGate", runtime_name)
+            except Exception as exc:
+                if self.process.poll() is not None:
+                    raise MihomoRuntimeError("Mihomo exited while probing OpenVPN nodes") from exc
+                results.append(
+                    OpenVPNProbeResult(
+                        profile=profile,
+                        healthy=False,
+                        reason="controller-selection-failed",
+                    )
+                )
+                continue
+
+            if self.process.poll() is not None:
+                raise MihomoRuntimeError("Mihomo exited while probing OpenVPN nodes")
+            try:
+                healthy = bool(self.health_checker(self.proxy_url))
+            except Exception:
+                healthy = False
+            if self.process.poll() is not None:
+                raise MihomoRuntimeError("Mihomo exited while probing OpenVPN nodes")
+            results.append(
+                OpenVPNProbeResult(
+                    profile=profile,
+                    healthy=healthy,
+                    reason="" if healthy else "proxy-health-failed",
+                )
+            )
+        return results
 
     def report_cycle(self, success: bool) -> None:
         if self._selected is None or self._reported:

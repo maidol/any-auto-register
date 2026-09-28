@@ -502,3 +502,49 @@ def test_openvpn_task_session_rejects_start_after_release():
 
     assert runtime.start_calls == 0
     assert runtime.release_calls == 1
+
+
+def test_runtime_probe_all_checks_every_profile_without_reporting(tmp_path):
+    reported = []
+    profiles = [runtime_record(index, f"node-{index}") for index in range(1, 4)]
+    manager, controller = build_manager(
+        tmp_path,
+        profiles=profiles,
+        health_results=[False, True, False],
+        callback=lambda profile, success: reported.append((profile.id, success)),
+        max_candidates=1,
+    )
+    manager.start_task()
+
+    results = manager.probe_all()
+
+    assert [(result.profile.id, result.healthy) for result in results] == [
+        (1, False),
+        (2, True),
+        (3, False),
+    ]
+    assert controller.selected == ["node-1", "node-2", "node-3"]
+    assert reported == []
+    manager.release()
+
+
+def test_runtime_probe_all_aborts_when_process_exits(tmp_path):
+    profiles = [runtime_record(index, f"node-{index}") for index in range(1, 4)]
+    manager, controller = build_manager(
+        tmp_path,
+        profiles=profiles,
+        health_results=[True, True, True],
+    )
+
+    def health_checker(_proxy_url):
+        manager.process.returncode = 1
+        return True
+
+    manager.health_checker = health_checker
+    manager.start_task()
+
+    with pytest.raises(RuntimeError, match="Mihomo exited"):
+        manager.probe_all()
+
+    assert controller.selected == ["node-1"]
+    manager.release()

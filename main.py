@@ -75,6 +75,8 @@ async def lifespan(app: FastAPI):
     print(f"[OK] 已加载平台: {[p['name'] for p in list_platforms()]}")
     from core.scheduler import scheduler
     scheduler.start()
+    from application.openvpn_refresh_scheduler import openvpn_refresh_scheduler
+    openvpn_refresh_scheduler.start()
     from services.task_runtime import task_runtime
     task_runtime.start()
     from services.solver_manager import start_async
@@ -88,6 +90,8 @@ async def lifespan(app: FastAPI):
     _sub2api_auto_sync.stop()
     from core.lifecycle import lifecycle_manager as _lifecycle_manager
     _lifecycle_manager.stop()
+    from application.openvpn_refresh_scheduler import openvpn_refresh_scheduler as _openvpn_refresh_scheduler
+    _openvpn_refresh_scheduler.stop()
     from core.scheduler import scheduler as _scheduler
     _scheduler.stop()
     from services.task_runtime import task_runtime as _task_runtime
