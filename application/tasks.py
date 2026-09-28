@@ -832,6 +832,11 @@ def _create_openvpn_task_session(logger: TaskLogger | None = None):
             if logger is not None:
                 logger.log(f"OpenVPN 代理健康上报失败（不影响本次结果）: {exc}", level="warning")
 
+    try:
+        max_candidates = int(os.getenv("MIHOMO_MAX_CANDIDATES", "5"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("MIHOMO_MAX_CANDIDATES must be an integer") from exc
+
     manager = MihomoRuntimeManager(
         profiles,
         binary=os.getenv("MIHOMO_BIN", "mihomo"),
@@ -839,6 +844,7 @@ def _create_openvpn_task_session(logger: TaskLogger | None = None):
         start_timeout=float(os.getenv("MIHOMO_START_TIMEOUT", "20")),
         health_url=os.getenv("MIHOMO_HEALTHCHECK_URL", "https://www.gstatic.com/generate_204"),
         health_timeout=float(os.getenv("MIHOMO_HEALTHCHECK_TIMEOUT", "20")),
+        max_candidates=max_candidates,
         report_callback=report,
     )
     return OpenVPNTaskSession(manager)

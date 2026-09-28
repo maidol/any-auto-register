@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import pytest
+
 from application.openvpn_task import OpenVPNTaskSession
 from tests.test_register_task_strategy import world
 
@@ -238,6 +240,41 @@ def test_failed_account_cleanup_error_does_not_skip_openvpn_release(monkeypatch)
 
     assert task["status"] == "succeeded"
     assert session.released == 1
+
+
+def _create_session_with_candidate_limit(monkeypatch, value=None):
+    from application.tasks import _create_openvpn_task_session
+
+    class FakeRepository:
+        def active_runtime_records(self):
+            return [FakeProfile(7)]
+
+    monkeypatch.setattr(
+        "infrastructure.openvpn_proxies_repository.OpenVPNProxiesRepository",
+        FakeRepository,
+    )
+    if value is None:
+        monkeypatch.delenv("MIHOMO_MAX_CANDIDATES", raising=False)
+    else:
+        monkeypatch.setenv("MIHOMO_MAX_CANDIDATES", value)
+    return _create_openvpn_task_session()
+
+
+def test_openvpn_session_uses_default_five_candidate_limit(monkeypatch):
+    session = _create_session_with_candidate_limit(monkeypatch)
+
+    assert session.runtime.max_candidates == 5
+
+
+def test_openvpn_session_zero_candidate_limit_is_unlimited(monkeypatch):
+    session = _create_session_with_candidate_limit(monkeypatch, "0")
+
+    assert session.runtime.max_candidates is None
+
+
+def test_openvpn_session_rejects_negative_candidate_limit(monkeypatch):
+    with pytest.raises(ValueError, match="max_candidates"):
+        _create_session_with_candidate_limit(monkeypatch, "-1")
 
 
 def test_repository_stats_callback_logs_but_does_not_raise(monkeypatch):

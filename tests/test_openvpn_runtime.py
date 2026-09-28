@@ -230,7 +230,7 @@ def test_runtime_does_not_return_stale_url_after_process_exit(tmp_path):
     assert manager.proxy_url == ""
 
 
-def test_runtime_traverses_all_profiles_without_default_five_node_cap(tmp_path):
+def test_runtime_applies_default_five_node_candidate_cap(tmp_path):
     profiles = [runtime_record(index, f"node-{index}") for index in range(1, 7)]
     manager, controller = build_manager(
         tmp_path,
@@ -239,10 +239,32 @@ def test_runtime_traverses_all_profiles_without_default_five_node_cap(tmp_path):
     )
     manager.start_task()
 
+    with pytest.raises(RuntimeError, match="all OpenVPN profiles failed"):
+        manager.select_for_cycle()
+
+    assert controller.selected == [f"node-{index}" for index in range(1, 6)]
+    manager.release()
+
+
+def test_runtime_zero_candidate_limit_traverses_all_profiles(tmp_path):
+    profiles = [runtime_record(index, f"node-{index}") for index in range(1, 7)]
+    manager, controller = build_manager(
+        tmp_path,
+        profiles=profiles,
+        health_results=[False, False, False, False, False, True],
+        max_candidates=0,
+    )
+    manager.start_task()
+
     selected = manager.select_for_cycle()
 
     assert selected.id == 6
     assert controller.selected == [f"node-{index}" for index in range(1, 7)]
+
+
+def test_runtime_rejects_negative_candidate_limit(tmp_path):
+    with pytest.raises(ValueError, match="max_candidates"):
+        build_manager(tmp_path, max_candidates=-1)
 
 
 def test_runtime_excludes_failed_profile_ids_from_later_selection(tmp_path):
