@@ -1,19 +1,46 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ChangeEvent } from 'react'
 import { apiFetch } from '@/lib/utils'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import { Plus, Trash2, RefreshCw, ToggleLeft, ToggleRight, Globe2, ShieldCheck, CircleOff, Activity } from 'lucide-react'
+import { Plus, Trash2, RefreshCw, ToggleLeft, ToggleRight, Globe2, ShieldCheck, CircleOff, Activity, Upload } from 'lucide-react'
 
 export default function Proxies() {
   const [proxies, setProxies] = useState<any[]>([])
   const [newProxy, setNewProxy] = useState('')
   const [region, setRegion] = useState('')
   const [checking, setChecking] = useState(false)
+  const [openvpnProxies, setOpenvpnProxies] = useState<any[]>([])
+  const [importing, setImporting] = useState(false)
+  const [importMessage, setImportMessage] = useState('')
 
-  const load = () => apiFetch('/proxies').then(setProxies)
+  const load = () => Promise.all([
+    apiFetch('/proxies').then(setProxies),
+    apiFetch('/proxies/openvpn').then(setOpenvpnProxies),
+  ])
 
   useEffect(() => { load() }, [])
+
+  const importMihomo = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    setImporting(true)
+    setImportMessage('')
+    try {
+      const content = await file.text()
+      const result = await apiFetch('/proxies/import/mihomo', {
+        method: 'POST',
+        body: JSON.stringify({ content, region }),
+      })
+      setImportMessage(`导入完成：新增 ${result.added}，已存在 ${result.existing}，拒绝 ${result.rejected}`)
+      await load()
+    } catch (error) {
+      setImportMessage(error instanceof Error ? error.message : '导入失败')
+    } finally {
+      setImporting(false)
+    }
+  }
 
   const add = async () => {
     if (!newProxy.trim()) return
@@ -90,6 +117,46 @@ export default function Proxies() {
           </Card>
         ))}
       </div>
+
+      <Card>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-[var(--text-primary)]">VPN Gate OpenVPN</div>
+            <div className="mt-1 text-xs text-[var(--text-muted)]">导入 Mihomo YAML，私钥只保存在后端，不会返回到列表接口。</div>
+          </div>
+          <label className="inline-flex cursor-pointer items-center rounded-md bg-[var(--accent)] px-3 py-2 text-sm font-medium text-white">
+            <Upload className="mr-1.5 h-4 w-4" />
+            {importing ? '导入中…' : '导入 Mihomo YAML'}
+            <input type="file" accept=".yaml,.yml" className="hidden" onChange={importMihomo} disabled={importing} />
+          </label>
+        </div>
+        {importMessage && <div className="mt-3 text-xs text-[var(--text-secondary)]">{importMessage}</div>}
+        <div className="mt-4 overflow-x-auto">
+          <table className="w-full min-w-[680px] text-xs">
+            <thead>
+              <tr className="border-b border-[var(--border)] text-left text-[var(--text-muted)]">
+                <th className="px-3 py-2">名称</th>
+                <th className="px-3 py-2">服务器</th>
+                <th className="px-3 py-2">协议</th>
+                <th className="px-3 py-2">成功/失败</th>
+                <th className="px-3 py-2">状态</th>
+              </tr>
+            </thead>
+            <tbody>
+              {openvpnProxies.map(item => (
+                <tr key={item.id} className="border-b border-[var(--border)]/40">
+                  <td className="px-3 py-2 font-mono">{item.name}</td>
+                  <td className="px-3 py-2">{item.server}:{item.port}</td>
+                  <td className="px-3 py-2">{item.proto}</td>
+                  <td className="px-3 py-2">{item.success_count} / {item.fail_count}</td>
+                  <td className="px-3 py-2"><Badge variant={item.is_active ? 'success' : 'danger'}>{item.is_active ? '活跃' : '禁用'}</Badge></td>
+                </tr>
+              ))}
+              {openvpnProxies.length === 0 && <tr><td colSpan={5} className="px-3 py-4 text-[var(--text-muted)]">尚未导入 OpenVPN 节点</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </Card>
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,330px)_minmax(0,1fr)]">
         <Card className="bg-[var(--bg-pane)]/60">

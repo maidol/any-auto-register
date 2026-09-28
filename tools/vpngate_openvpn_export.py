@@ -28,6 +28,12 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from core.openvpn_config import validate_openvpn_entry
+
 
 DEFAULT_SOURCE = "https://www.vpngate.net/api/iphone/"
 DEFAULT_TIMEOUT = 30
@@ -463,7 +469,7 @@ def build_mihomo_proxy(
         if comp_lzo not in {"yes", "no", "adaptive"}:
             raise ValueError(f"unsupported Mihomo OpenVPN comp-lzo: {comp_lzo}")
         proxy["comp-lzo"] = comp_lzo
-    return proxy
+    return validate_openvpn_entry(proxy)
 
 
 def _yaml_scalar(value: object) -> str:

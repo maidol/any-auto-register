@@ -8,6 +8,10 @@ services:
     environment:
       - DISPLAY=:99
       - ACCOUNT_MANAGER_DATABASE_URL=sqlite:////app/data/account_manager.db
+      - MIHOMO_BIN=/usr/local/bin/mihomo
+      - MIHOMO_START_TIMEOUT=20
+      - MIHOMO_HEALTHCHECK_TIMEOUT=20
+      - MIHOMO_HEALTHCHECK_URL=https://www.gstatic.com/generate_204
       # 可选：设置访问密码，不设置则无密码保护
       # - APP_PASSWORD=changeme
       # 可选：设置 VNC 密码

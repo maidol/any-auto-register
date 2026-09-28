@@ -8,6 +8,8 @@ RUN npm run build
 
 # Stage 2: Python 后端 + 运行环境
 FROM python:3.12-slim
+ARG MIHOMO_VERSION=1.19.31
+ARG TARGETARCH
 
 # 系统依赖：Chromium、Xvfb、x11vnc、noVNC
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -22,6 +24,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libdrm2 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libxkbcommon0 \
     libasound2 libpango-1.0-0 libcairo2 libgtk-3-0 \
     && rm -rf /var/lib/apt/lists/*
+
+# Install the pinned Mihomo release during image build.
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) asset="mihomo-linux-amd64-v${MIHOMO_VERSION}.gz"; sha256="d5e74bbddbdfff49a1aef7775bf5911da59f0d7196ed509a0ac914b3653dd5f1" ;; \
+      arm64) asset="mihomo-linux-arm64-v${MIHOMO_VERSION}.gz"; sha256="9e0f11afbf38426b8bd88fdc594678f8161c57eccb4e1b77acb12b493904f1d4" ;; \
+      *) echo "Unsupported Mihomo Docker architecture: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    url="https://github.com/MetaCubeX/mihomo/releases/download/v${MIHOMO_VERSION}/${asset}"; \
+    curl --fail --location --silent --show-error "$url" -o /tmp/mihomo.gz; \
+    echo "${sha256}  /tmp/mihomo.gz" | sha256sum --check --status; \
+    gzip -dc /tmp/mihomo.gz > /usr/local/bin/mihomo; \
+    chmod 0755 /usr/local/bin/mihomo; \
+    rm /tmp/mihomo.gz; \
+    /usr/local/bin/mihomo -v
+
+ENV MIHOMO_BIN=/usr/local/bin/mihomo
 
 WORKDIR /app
 

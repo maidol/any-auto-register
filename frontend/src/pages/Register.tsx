@@ -20,6 +20,7 @@ const DEFAULT_FORM: Record<string, any> = {
   retry_interval_seconds: 0,
   account_interval_seconds: 0,
   phone_retry_count: 2,
+  proxy_mode: 'pool',
   proxy: '',
   executor_type: '',
   captcha_solver: 'auto',
@@ -275,7 +276,8 @@ export default function Register() {
         retry_interval_seconds: form.retry_interval_seconds,
         account_interval_seconds: form.account_interval_seconds,
         phone_retry_count: form.phone_retry_count,
-        proxy: form.proxy || null,
+        proxy_mode: form.proxy_mode,
+        proxy: form.proxy_mode === 'openvpn' ? null : (form.proxy || null),
         executor_type: form.executor_type,
         captcha_solver: 'auto',
         extra,
@@ -323,7 +325,7 @@ export default function Register() {
     return () => window.clearInterval(interval)
   }, [applyTerminalTask, task?.task_id, task?.status])
 
-  const Input = ({ label, k, type = 'text', placeholder = '', min, max }: any) => (
+  const Input = ({ label, k, type = 'text', placeholder = '', min, max, disabled = false }: any) => (
     <div>
       <label className="block text-xs text-[var(--text-muted)] mb-1">{label}</label>
       <input
@@ -333,6 +335,7 @@ export default function Register() {
         placeholder={placeholder}
         min={min}
         max={max}
+        disabled={disabled}
         className="control-surface"
       />
     </div>
@@ -379,9 +382,15 @@ export default function Register() {
             <CardHeader><CardTitle>基本配置</CardTitle></CardHeader>
             <CardContent className="space-y-4">
               <Select label="平台" k="platform" options={platformOptions} />
-              <div className="grid gap-4 md:grid-cols-2">
+              <div className="grid gap-4 md:grid-cols-3">
                 <Input label="批量数量" k="count" type="number" />
-                <Input label="代理 (可选)" k="proxy" placeholder="http://user:pass@host:port" />
+                <Select label="代理来源" k="proxy_mode" options={[["pool", "普通代理池"], ["openvpn", "VPN Gate OpenVPN"]]} />
+                <Input
+                  label="代理 (可选)"
+                  k="proxy"
+                  placeholder="http://user:pass@host:port"
+                  disabled={form.proxy_mode === 'openvpn'}
+                />
               </div>
               <div className="grid gap-4 md:grid-cols-4">
                 <Input label="失败重试次数" k="retry_count" type="number" />

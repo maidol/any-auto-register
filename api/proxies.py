@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from application.openvpn_proxies import OpenVPNProxiesService
 from application.proxies import ProxiesService
 from domain.proxies import ProxyBulkCreateCommand, ProxyCreateCommand
 
 router = APIRouter(prefix="/proxies", tags=["proxies"])
 service = ProxiesService()
+openvpn_service = OpenVPNProxiesService()
 
 
 class ProxyCreateRequest(BaseModel):
@@ -17,6 +19,11 @@ class ProxyCreateRequest(BaseModel):
 
 class ProxyBulkCreateRequest(BaseModel):
     proxies: list[str]
+    region: str = ""
+
+
+class MihomoImportRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=2 * 1024 * 1024)
     region: str = ""
 
 
@@ -36,6 +43,34 @@ def create_proxy(body: ProxyCreateRequest):
 @router.post("/bulk")
 def bulk_create_proxies(body: ProxyBulkCreateRequest):
     return service.bulk_create_proxies(ProxyBulkCreateCommand(proxies=body.proxies, region=body.region))
+
+
+@router.post("/import/mihomo")
+def import_mihomo(body: MihomoImportRequest):
+    try:
+        return openvpn_service.import_mihomo(body.content, body.region)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/openvpn")
+def list_openvpn_proxies(region: str = ""):
+    return openvpn_service.list_metadata(region)
+
+
+@router.delete("/openvpn/{proxy_id}")
+def delete_openvpn_proxy(proxy_id: int):
+    if not openvpn_service.delete(proxy_id):
+        raise HTTPException(404, "OpenVPN 代理不存在")
+    return {"ok": True}
+
+
+@router.patch("/openvpn/{proxy_id}/toggle")
+def toggle_openvpn_proxy(proxy_id: int):
+    value = openvpn_service.toggle(proxy_id)
+    if value is None:
+        raise HTTPException(404, "OpenVPN 代理不存在")
+    return {"is_active": value}
 
 
 @router.delete("/{proxy_id}")
