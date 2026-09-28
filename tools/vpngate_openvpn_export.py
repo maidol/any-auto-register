@@ -119,8 +119,14 @@ _MIHOMO_CIPHERS = {
 _MIHOMO_AUTHS = {"MD5", "SHA1", "SHA256", "SHA384", "SHA512"}
 
 
-def fetch_snapshot(source: str, timeout: int) -> str:
+def fetch_snapshot(
+    source: str,
+    timeout: int,
+    max_bytes: int = MAX_SNAPSHOT_BYTES,
+) -> str:
     """Fetch a bounded UTF-8 snapshot from a VPN Gate feed."""
+    if int(max_bytes) <= 0:
+        raise ValueError("VPN Gate snapshot byte limit must be positive")
     request = urllib.request.Request(
         source,
         headers={
@@ -139,8 +145,8 @@ def fetch_snapshot(source: str, timeout: int) -> str:
             if not chunk:
                 break
             total += len(chunk)
-            if total > MAX_SNAPSHOT_BYTES:
-                raise ValueError("VPN Gate snapshot exceeds the 12 MiB limit")
+            if total > int(max_bytes):
+                raise ValueError("VPN Gate snapshot exceeds the configured limit")
             chunks.append(chunk)
     return b"".join(chunks).decode("utf-8", errors="strict")
 

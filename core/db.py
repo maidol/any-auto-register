@@ -315,6 +315,29 @@ class OpenVPNProxyModel(SQLModel, table=True):
     fail_count: int = 0
     is_active: bool = True
     last_checked: Optional[datetime] = None
+    source: str = Field(default="manual", index=True)
+    refresh_healthy: Optional[bool] = None
+    last_seen_at: Optional[datetime] = None
+    last_refresh_checked_at: Optional[datetime] = None
+
+
+class OpenVPNRefreshRunModel(SQLModel, table=True):
+    __tablename__ = "openvpn_refresh_runs"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    scheduled_for: str = Field(index=True)
+    started_at: datetime = Field(default_factory=_utcnow)
+    finished_at: Optional[datetime] = None
+    status: str = Field(default="running", index=True)
+    source: str = ""
+    snapshot_hash: str = ""
+    source_row_count: int = 0
+    convertible_count: int = 0
+    checked_count: int = 0
+    healthy_count: int = 0
+    failure_count: int = 0
+    attempt_number: int = 1
+    failures_json: str = "[]"
 
 
 def save_account(account) -> 'AccountModel':
@@ -635,6 +658,10 @@ def init_db():
     _ensure_column("provider_definitions", "category", "TEXT DEFAULT ''")
     SQLModel.metadata.create_all(engine)
     _migrate_openvpn_proxy_identity()
+    _ensure_column("openvpn_proxies", "source", "TEXT NOT NULL DEFAULT 'manual'")
+    _ensure_column("openvpn_proxies", "refresh_healthy", "BOOLEAN")
+    _ensure_column("openvpn_proxies", "last_seen_at", "DATETIME")
+    _ensure_column("openvpn_proxies", "last_refresh_checked_at", "DATETIME")
 
     with Session(engine) as session:
         ProviderDefinitionsRepository().ensure_seeded()

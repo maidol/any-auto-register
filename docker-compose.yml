@@ -14,6 +14,10 @@ services:
       - MIHOMO_HEALTHCHECK_URL=https://www.gstatic.com/generate_204
       # OpenVPN 每轮最多检查的候选节点；设为 0 表示不限制
       - MIHOMO_MAX_CANDIDATES=5
+      - VPN_GATE_REFRESH_ENABLED=true
+      - VPN_GATE_REFRESH_TIME=00:00
+      - VPN_GATE_REFRESH_TIMEZONE=Asia/Shanghai
+      - VPN_GATE_REFRESH_RETRIES=3
       # 可选：设置访问密码，不设置则无密码保护
       # - APP_PASSWORD=changeme
       # 可选：设置 VNC 密码

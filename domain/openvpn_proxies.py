@@ -31,11 +31,22 @@ class OpenVPNProxyRecord:
     fail_count: int = 0
     is_active: bool = True
     last_checked: Optional[datetime] = None
+    source: str = "manual"
+    refresh_healthy: Optional[bool] = None
+    last_seen_at: Optional[datetime] = None
+    last_refresh_checked_at: Optional[datetime] = None
 
 
 @dataclass(slots=True)
 class OpenVPNProxyRuntimeRecord(OpenVPNProxyRecord):
     config: dict[str, object] | None = None
+
+
+@dataclass(slots=True)
+class OpenVPNProbeResult:
+    profile: OpenVPNProxyRuntimeRecord
+    healthy: bool
+    reason: str = ""
 
 
 @dataclass(slots=True)
