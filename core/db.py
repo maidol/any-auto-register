@@ -300,6 +300,23 @@ class ProxyModel(SQLModel, table=True):
     last_checked: Optional[datetime] = None
 
 
+class OpenVPNProxyModel(SQLModel, table=True):
+    __tablename__ = "openvpn_proxies"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(index=True)
+    server: str = Field(index=True)
+    port: int
+    identity: str = Field(unique=True)
+    proto: str = "udp"
+    mihomo_config_json: str
+    region: str = Field(default="", index=True)
+    success_count: int = 0
+    fail_count: int = 0
+    is_active: bool = True
+    last_checked: Optional[datetime] = None
+
+
 def save_account(account) -> 'AccountModel':
     """从 base_platform.Account 存入数据库（同平台同邮箱则更新）"""
     from core.account_graph import sync_platform_account_graph
@@ -537,6 +554,78 @@ def _migrate_legacy_accounts_schema() -> None:
         connection.exec_driver_sql("PRAGMA foreign_keys=ON")
 
 
+def _migrate_openvpn_proxy_identity() -> None:
+    """Backfill stable OpenVPN identities, merge duplicates, and enforce uniqueness.
+
+    When duplicate legacy rows converge, the newest id keeps its config, region,
+    and active state; success/failure counters are summed across the group.
+    """
+    from domain.openvpn_proxies import openvpn_proxy_identity
+
+    _ensure_column("openvpn_proxies", "identity", "TEXT")
+    with engine.begin() as connection:
+        rows = connection.exec_driver_sql(
+            """
+            SELECT id, name, server, port, success_count, fail_count
+            FROM openvpn_proxies
+            ORDER BY id
+            """
+        ).mappings().all()
+        groups: dict[str, list[dict]] = {}
+        for row in rows:
+            identity = openvpn_proxy_identity(
+                str(row["name"] or ""), str(row["server"] or ""), int(row["port"] or 0)
+            )
+            connection.exec_driver_sql(
+                "UPDATE openvpn_proxies SET identity = ? WHERE id = ?",
+                (identity, row["id"]),
+            )
+            groups.setdefault(identity, []).append(row)
+
+        for identity, group in groups.items():
+            if len(group) < 2:
+                continue
+            newest = group[-1]
+            duplicate_ids = [row["id"] for row in group[:-1]]
+            connection.exec_driver_sql(
+                """
+                UPDATE openvpn_proxies
+                SET success_count = ?, fail_count = ?
+                WHERE id = ?
+                """,
+                (
+                    sum(int(row["success_count"] or 0) for row in group),
+                    sum(int(row["fail_count"] or 0) for row in group),
+                    newest["id"],
+                ),
+            )
+            for duplicate_id in duplicate_ids:
+                connection.exec_driver_sql(
+                    "DELETE FROM openvpn_proxies WHERE id = ?", (duplicate_id,)
+                )
+
+        unique_identity_exists = False
+        for index in connection.exec_driver_sql(
+            "PRAGMA index_list('openvpn_proxies')"
+        ).mappings():
+            if not index["unique"]:
+                continue
+            index_name = str(index["name"]).replace('"', '""')
+            columns = connection.exec_driver_sql(
+                f'PRAGMA index_info("{index_name}")'
+            ).mappings().all()
+            if [column["name"] for column in columns] == ["identity"]:
+                unique_identity_exists = True
+                break
+        if not unique_identity_exists:
+            connection.exec_driver_sql(
+                """
+                CREATE UNIQUE INDEX uq_openvpn_proxies_identity
+                ON openvpn_proxies (identity)
+                """
+            )
+
+
 def init_db():
     SQLModel.metadata.create_all(engine)
     from core.account_graph import sync_all_account_graphs
@@ -545,6 +634,7 @@ def init_db():
     _migrate_legacy_accounts_schema()
     _ensure_column("provider_definitions", "category", "TEXT DEFAULT ''")
     SQLModel.metadata.create_all(engine)
+    _migrate_openvpn_proxy_identity()
 
     with Session(engine) as session:
         ProviderDefinitionsRepository().ensure_seeded()

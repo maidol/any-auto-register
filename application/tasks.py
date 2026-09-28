@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import threading
 import time
 import uuid
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
@@ -809,6 +812,38 @@ def _build_proxy_snapshot(pool, size: int) -> list[str]:
     return snapshot
 
 
+def _create_openvpn_task_session(logger: TaskLogger | None = None):
+    from application.openvpn_task import OpenVPNTaskSession
+    from core.openvpn_runtime import MihomoRuntimeManager
+    from infrastructure.openvpn_proxies_repository import OpenVPNProxiesRepository
+
+    repository = OpenVPNProxiesRepository()
+    profiles = repository.active_runtime_records()
+    if not profiles:
+        raise RuntimeError("没有可用的 OpenVPN 代理")
+
+    def report(profile, success: bool) -> None:
+        try:
+            if success:
+                repository.report_success(profile.id)
+            else:
+                repository.report_fail(profile.id)
+        except Exception as exc:
+            if logger is not None:
+                logger.log(f"OpenVPN 代理健康上报失败（不影响本次结果）: {exc}", level="warning")
+
+    manager = MihomoRuntimeManager(
+        profiles,
+        binary=os.getenv("MIHOMO_BIN", "mihomo"),
+        work_root=Path(os.getenv("MIHOMO_RUNTIME_DIR", tempfile.gettempdir())),
+        start_timeout=float(os.getenv("MIHOMO_START_TIMEOUT", "20")),
+        health_url=os.getenv("MIHOMO_HEALTHCHECK_URL", "https://www.gstatic.com/generate_204"),
+        health_timeout=float(os.getenv("MIHOMO_HEALTHCHECK_TIMEOUT", "20")),
+        report_callback=report,
+    )
+    return OpenVPNTaskSession(manager)
+
+
 def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
     from dataclasses import replace
 
@@ -837,7 +872,17 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
     email = payload.get("email") or None
     password = payload.get("password") or None
     proxy = payload.get("proxy") or None
+    proxy_mode = str(payload.get("proxy_mode", "pool") or "pool").strip().lower()
     extra = dict(payload.get("extra") or {})
+
+    if proxy_mode not in {"pool", "openvpn"}:
+        logger.log("策略参数不合法: proxy_mode 必须是 pool 或 openvpn", level="error")
+        logger.finish(TASK_STATUS_FAILED, error="proxy_mode 必须是 pool 或 openvpn")
+        return
+    if proxy_mode == "openvpn" and proxy:
+        logger.log("策略参数不合法: proxy_mode=openvpn 不能同时指定固定 proxy", level="error")
+        logger.finish(TASK_STATUS_FAILED, error="proxy_mode=openvpn 不能同时指定固定 proxy")
+        return
 
     try:
         strategy = RegistrationStrategy.from_payload(payload)
@@ -870,6 +915,26 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
         logger.finish(TASK_STATUS_FAILED, error=str(exc))
         return
 
+    openvpn_session = None
+    task_proxy = proxy
+    initial_openvpn_selected = None
+    if proxy_mode == "openvpn":
+        try:
+            openvpn_session = _create_openvpn_task_session(logger)
+            task_proxy = openvpn_session.start()
+            if not task_proxy:
+                raise RuntimeError("OpenVPN runtime 未提供代理地址")
+            try:
+                initial_openvpn_selected = openvpn_session.select_for_cycle()
+            except Exception as exc:
+                raise RuntimeError(f"OpenVPN 节点选择失败: {exc}") from exc
+        except Exception as exc:
+            if openvpn_session is not None:
+                openvpn_session.release()
+            logger.log(f"OpenVPN 初始化失败: {exc}", level="error")
+            logger.finish(TASK_STATUS_FAILED, error=f"OpenVPN 初始化失败: {exc}")
+            return
+
     # Pre-create a shared mailbox instance for the entire task to avoid
     # concurrent initialization issues (e.g. MoeMail auto-registering
     # multiple provider accounts simultaneously).
@@ -886,9 +951,11 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
             shared_mailbox = create_mailbox(
                 provider=extra.get("mail_provider", ""),
                 extra=extra,
-                proxy=proxy or None,
+                proxy=task_proxy or None,
             )
     except Exception as exc:
+        if openvpn_session is not None:
+            openvpn_session.release()
         logger.log(f"邮箱初始化失败: {exc}", level="error")
         logger.finish(TASK_STATUS_FAILED, error=f"邮箱初始化失败: {exc}")
         return
@@ -903,11 +970,13 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
 
     try:
         allocator = TaskProxyAllocator(
-            _build_proxy_snapshot(proxy_pool, snapshot_budget) if not proxy else [],
-            fixed_proxy=proxy,
-            require_proxy=strategy.require_proxy,
+            _build_proxy_snapshot(proxy_pool, snapshot_budget) if not task_proxy else [],
+            fixed_proxy=task_proxy,
+            require_proxy=strategy.require_proxy or proxy_mode == "openvpn",
         )
     except ProxyExhausted as exc:
+        if openvpn_session is not None:
+            openvpn_session.release()
         logger.log(f"代理不可用: {exc}", level="error")
         logger.finish(TASK_STATUS_FAILED, error=str(exc))
         return
@@ -922,7 +991,15 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
     # 认周期起点，是因为 AccountCycleRunner 的 cleanup 钩子是每次尝试调的，
     # 而 index 在 HeroSMS 补单那几个 runner 里会从 0 重新开始。
     # password 与 mailbox 同寿命：一轮 = 一对凭据。
-    cycle: dict[str, Any] = {"mailbox": None, "open": False, "password": None, "resume": None, "reused": ""}
+    cycle: dict[str, Any] = {
+        "mailbox": None,
+        "open": False,
+        "password": None,
+        "resume": None,
+        "reused": "",
+        "openvpn_selected": initial_openvpn_selected,
+        "openvpn_preselected": initial_openvpn_selected is not None,
+    }
 
     def _close_cycle() -> None:
         """结束当前周期：丢掉钉住的邮箱，按开关拆掉 provider 侧浏览器。"""
@@ -937,16 +1014,25 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
             cycle["reused"] = ""
         if shared_mailbox is None or not strategy.clean_browser_context:
             return
-        close = getattr(shared_mailbox, "close", None)
-        if not callable(close):
-            return
         try:
-            close()
+            close = getattr(shared_mailbox, "close", None)
+            if callable(close):
+                close()
         except Exception as exc:
             logger.log(f"邮箱清理失败（不影响本轮结果）: {exc}", level="warning")
 
     def _open_cycle() -> None:
         _close_cycle()
+        if openvpn_session is not None:
+            if cycle["openvpn_preselected"]:
+                cycle["openvpn_preselected"] = False
+                selected = cycle["openvpn_selected"]
+            else:
+                selected = openvpn_session.select_for_cycle()
+                cycle["openvpn_selected"] = selected
+            logger.log(
+                f"OpenVPN 周期节点: {selected.name} / {selected.server}:{selected.port}"
+            )
         cycle["mailbox"] = PinnedMailbox(shared_mailbox) if shared_mailbox is not None else None
         cycle["open"] = True
         # 需求 20260926 第 2 条：账号列表里有注册失败的账号，就先复用它的邮箱和密码。
@@ -1008,7 +1094,7 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
             logger.log(f"失败账号落库失败（不影响本次结果）: {save_exc}", level="warning")
 
     def _register_once(index: int, attempt: int, resolved_proxy: str | None) -> AttemptOutcome:
-        if attempt == 0:
+        if attempt == 0 or (openvpn_session is not None and not cycle["open"]):
             _open_cycle()
         label = state["index_offset"] + index + 1
         logger.log(
@@ -1096,6 +1182,15 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
         return None
 
     def _report_proxy(resolved_proxy: str | None, health: str) -> None:
+        if openvpn_session is not None:
+            try:
+                openvpn_session.report_cycle(health == PROXY_OK)
+            except Exception as exc:
+                logger.log(
+                    f"OpenVPN 代理健康上报失败（不影响本次结果）: {exc}",
+                    level="warning",
+                )
+            return
         if not resolved_proxy:
             return
         try:
@@ -1173,7 +1268,13 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
     finally:
         # 最后一轮也要清。「下一轮开始前再清」会把它漏掉，而那正是任务
         # 结束后仍然留着一个浏览器进程的那一份。
-        _close_cycle()
+        try:
+            _close_cycle()
+        except Exception as exc:
+            logger.log(f"注册周期清理失败（不影响 OpenVPN 运行时回收）: {exc}", level="warning")
+        finally:
+            if openvpn_session is not None:
+                openvpn_session.release()
 
     logger.set_result_data({
         "stop_reason": stop_reason,

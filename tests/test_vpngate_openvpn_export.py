@@ -4,6 +4,8 @@ import base64
 import csv
 import io
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -178,6 +180,19 @@ def test_write_outputs_preserves_snapshot_and_records_metadata(tmp_path: Path):
         "vpngate.meta.json",
         "mihomo-openvpn.yaml",
     ]
+
+
+def test_cli_help_works_when_invoked_by_script_path():
+    script = Path(__file__).parents[1] / "tools" / "vpngate_openvpn_export.py"
+    result = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        cwd=script.parents[1],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "--output-dir" in result.stdout
 
 
 def test_main_runs_export_with_monkeypatched_source(tmp_path: Path, monkeypatch, capsys):

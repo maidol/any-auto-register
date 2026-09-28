@@ -8,6 +8,22 @@ from application.tasks import (
     _mutate_task,
     create_task,
 )
+def test_register_task_preserves_openvpn_proxy_mode(client):
+    response = client.post(
+        "/api/tasks/register",
+        json={"platform": "chatgpt", "count": 1, "proxy_mode": "openvpn"},
+    )
+
+    assert response.status_code == 200
+    from sqlmodel import Session
+    from core.db import TaskModel, engine
+
+    with Session(engine) as session:
+        task = session.get(TaskModel, response.json()["task_id"])
+        assert task is not None
+        assert task.get_payload()["proxy_mode"] == "openvpn"
+
+
 def test_task_history_serializes_cancellable_status(client):
     task = create_task(
         task_type="register",
