@@ -6,7 +6,7 @@ import { apiFetch } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Card } from '@/components/ui/card'
-import { Save, Eye, EyeOff, Mail, Shield, Cpu, Sliders, Plus, X, Orbit, Package2, MessageSquare } from 'lucide-react'
+import { Save, Eye, EyeOff, Mail, Shield, Cpu, Sliders, Plus, X, Orbit, Package2, MessageSquare, RefreshCw } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import ProviderCards from '@/components/settings/ProviderCards'
 
@@ -297,10 +297,11 @@ const TABS: { id: string; label: string; icon: any; sections?: any[] }[] = [
       ],
     }, {
       section: 'Sub2API',
-      desc: '账号列表勾选后手动导入；开启定时后，开启之后新注册的账号会被自动导入（已导入的不会重复）',
+      desc: '账号导入会绑定所选默认分组，并在导入后刷新账号、同步上游模型。必须先配置默认分组；已导入账号不会重复创建。',
       items: [
         { key: 'sub2api_url', label: 'API URL', placeholder: 'https://your-sub2api.example.com' },
         { key: 'sub2api_admin_key', label: 'Admin API Key', secret: true },
+        { key: 'sub2api_default_group_id', label: '默认分组', type: 'sub2api_group' },
         {
           key: 'sub2api_auto_sync',
           label: '定时自动导入新增账号',
@@ -312,8 +313,14 @@ const TABS: { id: string; label: string; icon: any; sections?: any[] }[] = [
   },
 ]
 
-function Field({ field, form, setForm, showSecret, setShowSecret, selectOptions }: any) {
-  const { key, label, placeholder, secret } = field
+type Sub2ApiGroup = { id: string | number; name?: string }
+
+function normalizeSub2ApiUrl(value: unknown): string {
+  return String(value || '').trim().replace(/\/+$/, '')
+}
+
+function Field({ field, form, setForm, showSecret, setShowSecret, selectOptions, sub2apiGroups, sub2apiGroupsLoading, sub2apiGroupsLoaded, sub2apiGroupsError, sub2apiInstanceChanged, onRefreshSub2ApiGroups }: any) {
+  const { key, label, placeholder, secret, type } = field
   const options = (field.options && field.options.length > 0)
     ? field.options
     : ((selectOptions && selectOptions.length > 0) ? selectOptions : null)
@@ -321,7 +328,34 @@ function Field({ field, form, setForm, showSecret, setShowSecret, selectOptions 
     <div className="grid grid-cols-3 gap-4 items-center py-3 border-b border-white/5 last:border-0">
       <label className="text-sm text-[var(--text-secondary)] font-medium">{label}</label>
       <div className="col-span-2 relative">
-        {options ? (
+        {type === 'sub2api_group' ? (
+          <>
+            <div className="flex gap-2">
+              <select
+                value={form[key] || ''}
+                onChange={e => setForm((f: any) => ({ ...f, [key]: e.target.value }))}
+                disabled={sub2apiGroupsLoading || sub2apiGroups.length === 0}
+                className="control-surface appearance-none"
+              >
+                <option value="">请选择默认分组</option>
+                {form[key] && !sub2apiGroups.some((group: Sub2ApiGroup) => String(group.id) === String(form[key])) && (
+                  <option value={form[key]}>当前分组 {form[key]} 不在已加载列表中</option>
+                )}
+                {sub2apiGroups.map((group: Sub2ApiGroup) => (
+                  <option key={group.id} value={String(group.id)}>{group.name || `分组 ${group.id}`}</option>
+                ))}
+              </select>
+              <Button type="button" variant="outline" size="sm" onClick={onRefreshSub2ApiGroups} disabled={sub2apiGroupsLoading}>
+                <RefreshCw className={cn('mr-1.5 h-3.5 w-3.5', sub2apiGroupsLoading && 'animate-spin')} />
+                {sub2apiGroupsLoading ? '加载中' : '刷新分组'}
+              </Button>
+            </div>
+            {sub2apiGroupsError && <p className="mt-1 text-xs text-red-400">{sub2apiGroupsError}</p>}
+            {!sub2apiGroupsError && !sub2apiGroupsLoaded && <p className="mt-1 text-xs text-[var(--text-muted)]">请先保存 Sub2API 地址和 Admin API Key，再刷新分组。</p>}
+            {!sub2apiGroupsError && sub2apiGroupsLoaded && sub2apiGroups.length === 0 && <p className="mt-1 text-xs text-[var(--text-muted)]">未找到可用分组，请先在 Sub2API 中创建分组。</p>}
+            {sub2apiInstanceChanged && <p className="mt-1 text-xs text-amber-400">保存新的 Sub2API 地址后会清空旧分组，请为新实例重新选择分组。</p>}
+          </>
+        ) : options ? (
           <select
             value={form[key] || options[0].value}
             onChange={e => setForm((f: any) => ({ ...f, [key]: e.target.value }))}
@@ -844,6 +878,28 @@ export default function Settings({ embedded, defaultTab }: { embedded?: boolean;
   const [_providerDeleting, _setProviderDeleting] = useState<Record<string, boolean>>({})
   const [providerCreating, setProviderCreating] = useState<Record<string, boolean>>({})
   const [solverRunning] = useState<boolean | null>(null)
+  const [sub2apiGroups, setSub2apiGroups] = useState<Sub2ApiGroup[]>([])
+  const [sub2apiGroupsLoading, setSub2apiGroupsLoading] = useState(false)
+  const [sub2apiGroupsLoaded, setSub2apiGroupsLoaded] = useState(false)
+  const [sub2apiGroupsError, setSub2apiGroupsError] = useState('')
+  const [sub2apiSavedUrl, setSub2apiSavedUrl] = useState('')
+
+  const loadSub2ApiGroups = async () => {
+    setSub2apiGroupsLoading(true)
+    setSub2apiGroupsError('')
+    try {
+      const groups = await apiFetch('/accounts/sub2api/groups')
+      if (!Array.isArray(groups)) throw new Error('Sub2API 分组响应格式无效')
+      setSub2apiGroups(groups)
+      setSub2apiGroupsLoaded(true)
+    } catch (error) {
+      setSub2apiGroups([])
+      setSub2apiGroupsLoaded(false)
+      setSub2apiGroupsError(error instanceof Error ? error.message : '获取 Sub2API 分组失败')
+    } finally {
+      setSub2apiGroupsLoading(false)
+    }
+  }
 
   const loadConfigData = async () => {
     const [cfg, options] = await Promise.all([
@@ -851,6 +907,14 @@ export default function Settings({ embedded, defaultTab }: { embedded?: boolean;
       getConfigOptions().catch(() => null),
     ])
     setForm(cfg)
+    setSub2apiSavedUrl(normalizeSub2ApiUrl(cfg.sub2api_url))
+    if (cfg.sub2api_url && cfg.sub2api_admin_key) {
+      await loadSub2ApiGroups()
+    } else {
+      setSub2apiGroups([])
+      setSub2apiGroupsLoaded(false)
+      setSub2apiGroupsError('')
+    }
     if (options) {
       setConfigOptions(options)
       const nextMailbox = options.mailbox_settings || []
@@ -897,8 +961,21 @@ export default function Settings({ embedded, defaultTab }: { embedded?: boolean;
   const save = async () => {
     setSaving(true)
     try {
-      await apiFetch('/config', { method: 'PUT', body: JSON.stringify({ data: form }) })
+      const nextUrl = normalizeSub2ApiUrl(form.sub2api_url)
+      const endpointChanged = nextUrl !== sub2apiSavedUrl
+      const nextForm = endpointChanged ? { ...form, sub2api_default_group_id: '' } : form
+      await apiFetch('/config', { method: 'PUT', body: JSON.stringify({ data: nextForm }) })
       invalidateConfigCache()
+      if (endpointChanged) {
+        setForm(nextForm)
+        setSub2apiGroups([])
+        setSub2apiGroupsLoaded(false)
+        setSub2apiGroupsError('')
+      }
+      setSub2apiSavedUrl(nextUrl)
+      if (nextForm.sub2api_url && nextForm.sub2api_admin_key) {
+        await loadSub2ApiGroups()
+      }
       setSaved(true); setTimeout(() => setSaved(false), 2000)
     } finally { setSaving(false) }
   }
@@ -1301,7 +1378,11 @@ export default function Settings({ embedded, defaultTab }: { embedded?: boolean;
                   {items.map((field: any) => (
                     <Field key={field.key} field={field} form={form} setForm={setForm}
                       showSecret={showSecret} setShowSecret={setShowSecret}
-                      selectOptions={getSelectOptions(field.key)} />
+                      selectOptions={getSelectOptions(field.key)}
+                      sub2apiGroups={sub2apiGroups} sub2apiGroupsLoading={sub2apiGroupsLoading}
+                      sub2apiGroupsLoaded={sub2apiGroupsLoaded} sub2apiGroupsError={sub2apiGroupsError}
+                      sub2apiInstanceChanged={normalizeSub2ApiUrl(form.sub2api_url) !== sub2apiSavedUrl}
+                      onRefreshSub2ApiGroups={loadSub2ApiGroups} />
                   ))}
                 </div>
               ))}
