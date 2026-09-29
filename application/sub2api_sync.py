@@ -10,6 +10,7 @@ import hashlib
 import json
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
@@ -25,9 +26,15 @@ ACCOUNT_ID_KEY = "sub2api_account_id"
 IMPORT_GROUP_ID_KEY = "sub2api_import_group_id"
 IMPORT_KNOWN_IDS_KEY = "sub2api_import_known_ids"
 IMPORT_FINGERPRINT_KEY = "sub2api_import_fingerprint"
+IMPORT_IDENTITY_KEY = "sub2api_import_identity"
+IMPORT_MARKER_KEY = "sub2api_import_marker"
+IMPORT_RECONCILE_BLOCKED_KEY = "sub2api_import_reconcile_blocked"
+IMPORT_MARKER_FIELD = "any_auto_register_import_marker"
 INSTANCE_URL_KEY = "sub2api_instance_url"
 REFRESHED_AT_KEY = "sub2api_refreshed_at"
 MODELS_SYNCED_AT_KEY = "sub2api_models_synced_at"
+SUB2API_GROUP_ID_KEY = "sub2api_group_id"
+GROUP_BOUND_AT_KEY = "sub2api_group_bound_at"
 AUTO_SYNC_SINCE_KEY = "sub2api_auto_sync_since"
 AUTO_SYNC_STATUSES = {"registered", "trial", "subscribed"}
 DEFAULT_INTERVAL_MINUTES = 10
@@ -50,14 +57,25 @@ def _as_utc(value: Optional[datetime]) -> Optional[datetime]:
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
 
-def _idempotency_key(item: AccountRecord, data: dict, group_id: str) -> str:
-    # 同一账号、凭据和分组 → 同一个 key：超时后重推会由 sub2api 回放。
-    raw = f"{item.id}:{group_id}:{json.dumps(data, sort_keys=True, ensure_ascii=False)}"
+def _idempotency_key(item: AccountRecord, data: dict, group_id: str, import_marker: str = "") -> str:
+    # 同一导入尝试保持相同 key；Sub2API 拒绝同 key 的不同 payload，避免结果未明时重复创建。
+    payload_key = import_marker or json.dumps(data, sort_keys=True, ensure_ascii=False)
+    raw = f"{item.id}:{group_id}:{payload_key}"
     return "aar-sub2api-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:48]
 
 
-def _import_fingerprint(item: AccountRecord) -> str:
+def _sub2api_payload(item: AccountRecord, import_marker: str = "") -> dict:
     data = _make_sub2api_json(item)
+    if import_marker:
+        account = data["accounts"][0]
+        extra = dict(account.get("extra") or {})
+        extra[IMPORT_MARKER_FIELD] = import_marker
+        account["extra"] = extra
+    return data
+
+
+def _import_fingerprint(item: AccountRecord, import_marker: str = "") -> str:
+    data = _sub2api_payload(item, import_marker)
     raw = json.dumps(data, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -70,6 +88,10 @@ def _has_token(data: dict) -> bool:
 
 class Sub2ApiClientError(RuntimeError):
     """Sub2API responded with an unusable result or could not be reached."""
+
+
+class Sub2ApiImportRejected(Sub2ApiClientError):
+    """The import was definitely rejected without creating an account."""
 
 
 class Sub2ApiClient:
@@ -99,17 +121,17 @@ class Sub2ApiClient:
             raise Sub2ApiClientError("Sub2API 分组响应格式无效")
         return [group for group in groups if isinstance(group, dict) and group.get("id") is not None]
 
-    def import_account(self, item: AccountRecord, group_id: str) -> tuple[bool, str]:
-        data = _make_sub2api_json(item)
+    def import_account(self, item: AccountRecord, group_id: str, import_marker: str = "") -> tuple[bool, str]:
+        data = _sub2api_payload(item, import_marker)
         if not _has_token(data):
-            return False, "账号缺少 access_token / refresh_token"
+            raise Sub2ApiImportRejected("账号缺少 access_token / refresh_token")
         try:
             resp = requests.post(
                 f"{self.base_url}/api/v1/admin/accounts/data",
                 json={"data": data, "group_ids": [int(group_id)], "skip_default_group_bind": True},
                 headers={
                     "x-api-key": self.admin_key,
-                    "Idempotency-Key": _idempotency_key(item, data, group_id),
+                    "Idempotency-Key": _idempotency_key(item, data, group_id, import_marker),
                 },
                 timeout=self.timeout,
             )
@@ -121,17 +143,29 @@ class Sub2ApiClient:
             body = None
         if not isinstance(body, dict):
             return False, f"HTTP {resp.status_code}: {resp.text[:200]}"
-        if resp.status_code != 200 or body.get("code") != 0:
-            return False, f"HTTP {resp.status_code}: {body.get('message') or resp.text[:200]}"
+        if resp.status_code != 200:
+            message = f"HTTP {resp.status_code}: {body.get('message') or resp.text[:200]}"
+            if resp.status_code < 500 and resp.status_code not in {408, 409, 429}:
+                raise Sub2ApiImportRejected(message)
+            return False, message
+        if body.get("code") != 0:
+            raise Sub2ApiImportRejected(str(body.get("message") or "Sub2API 拒绝导入"))
         # HTTP 200 不等于建成了：校验失败的账号只进 errors，account_created 是 0。
         result = body.get("data") or {}
         if int(result.get("account_created") or 0) < 1:
             errors = result.get("errors") or []
             message = (errors[0] or {}).get("message") if errors else ""
-            return False, str(message or "sub2api 未创建账号")
+            raise Sub2ApiImportRejected(str(message or "sub2api 未创建账号"))
         return True, ""
 
-    def list_matching_account_ids(self, item: AccountRecord) -> set[int]:
+    def list_matching_account_ids(
+        self,
+        item: AccountRecord,
+        *,
+        identity: str | None = None,
+        import_marker: str | None = None,
+    ) -> set[int]:
+        search_identity = identity or item.email
         page = 1
         pages = 1
         account_ids: set[int] = set()
@@ -139,7 +173,7 @@ class Sub2ApiClient:
             try:
                 resp = requests.get(
                     f"{self.base_url}/api/v1/admin/accounts",
-                    params={"page": page, "page_size": 100, "search": item.email},
+                    params={"page": page, "page_size": 100, "search": search_identity},
                     headers={"x-api-key": self.admin_key},
                     timeout=self.timeout,
                 )
@@ -160,17 +194,28 @@ class Sub2ApiClient:
             for row in rows:
                 if not isinstance(row, dict):
                     continue
-                identity = str(row.get("name") or row.get("email") or "").strip()
-                if identity.casefold() == item.email.casefold() and row.get("id") is not None:
-                    try:
-                        account_ids.add(int(row["id"]))
-                    except (TypeError, ValueError):
-                        raise ValueError("Sub2API 账号 ID 格式无效")
+                row_identity = str(row.get("name") or row.get("email") or "").strip()
+                if row_identity.casefold() != search_identity.casefold() or row.get("id") is None:
+                    continue
+                extra = row.get("extra") or {}
+                if import_marker and (not isinstance(extra, dict) or extra.get(IMPORT_MARKER_FIELD) != import_marker):
+                    continue
+                try:
+                    account_ids.add(int(row["id"]))
+                except (TypeError, ValueError):
+                    raise ValueError("Sub2API 账号 ID 格式无效")
             page += 1
         return account_ids
 
-    def find_new_account_id(self, item: AccountRecord, known_ids: set[int]) -> int | None:
-        new_ids = self.list_matching_account_ids(item) - known_ids
+    def find_new_account_id(
+        self,
+        item: AccountRecord,
+        known_ids: set[int],
+        *,
+        identity: str | None = None,
+        import_marker: str | None = None,
+    ) -> int | None:
+        new_ids = self.list_matching_account_ids(item, identity=identity, import_marker=import_marker) - known_ids
         return next(iter(new_ids)) if len(new_ids) == 1 else None
 
     def _post_account_action(self, path: str) -> None:
@@ -186,6 +231,21 @@ class Sub2ApiClient:
         if resp.status_code != 200 or not isinstance(body, dict) or body.get("code") != 0:
             message = body.get("message") if isinstance(body, dict) else resp.text[:200]
             raise ValueError(f"Sub2API 操作失败: HTTP {resp.status_code}: {message or resp.text[:200]}")
+
+    def bind_account_group(self, account_id: int, group_id: str) -> None:
+        try:
+            resp = requests.put(
+                f"{self.base_url}/api/v1/admin/accounts/{account_id}",
+                json={"group_ids": [int(group_id)]},
+                headers={"x-api-key": self.admin_key},
+                timeout=self.timeout,
+            )
+            body = resp.json()
+        except Exception as exc:
+            raise ValueError(f"Sub2API 分组绑定请求失败: {exc}") from exc
+        if resp.status_code != 200 or not isinstance(body, dict) or body.get("code") != 0:
+            message = body.get("message") if isinstance(body, dict) else resp.text[:200]
+            raise ValueError(f"Sub2API 分组绑定失败: HTTP {resp.status_code}: {message or resp.text[:200]}")
 
     def refresh_account(self, account_id: int) -> None:
         self._post_account_action(f"/api/v1/admin/accounts/{account_id}/refresh")
@@ -281,7 +341,8 @@ class Sub2ApiSyncService:
         overview = item.overview or {}
         if overview.get(SYNCED_AT_KEY):
             if overview.get(ACCOUNT_ID_KEY):
-                return not (overview.get(REFRESHED_AT_KEY) and overview.get(MODELS_SYNCED_AT_KEY))
+                group_pending = bool(overview.get(SUB2API_GROUP_ID_KEY) and not overview.get(GROUP_BOUND_AT_KEY))
+                return group_pending or not (overview.get(REFRESHED_AT_KEY) and overview.get(MODELS_SYNCED_AT_KEY))
             return bool(overview.get(IMPORT_KNOWN_IDS_KEY))
         return bool(overview.get(IMPORT_GROUP_ID_KEY) and overview.get(IMPORT_KNOWN_IDS_KEY))
 
@@ -292,6 +353,7 @@ class Sub2ApiSyncService:
             "created": 0,
             "skipped": 0,
             "failed": 0,
+            "group_bind_failed": 0,
             "refresh_failed": 0,
             "model_sync_failed": 0,
             "postprocess_failed": 0,
@@ -325,14 +387,19 @@ class Sub2ApiSyncService:
 
     def _postprocess(self, client: Sub2ApiClient, item: AccountRecord, overview: dict, summary: dict) -> None:
         account_id = int(overview[ACCOUNT_ID_KEY])
-        for stage, done_key, failure_key, action in (
-            ("refresh", REFRESHED_AT_KEY, "refresh_failed", client.refresh_account),
-            ("model_sync", MODELS_SYNCED_AT_KEY, "model_sync_failed", client.sync_upstream_models),
-        ):
+        group_id = str(overview.get(SUB2API_GROUP_ID_KEY) or "")
+        stages = []
+        if group_id:
+            stages.append(("group_bind", GROUP_BOUND_AT_KEY, "group_bind_failed", lambda: client.bind_account_group(account_id, group_id)))
+        stages.extend((
+            ("refresh", REFRESHED_AT_KEY, "refresh_failed", lambda: client.refresh_account(account_id)),
+            ("model_sync", MODELS_SYNCED_AT_KEY, "model_sync_failed", lambda: client.sync_upstream_models(account_id)),
+        ))
+        for stage, done_key, failure_key, action in stages:
             if overview.get(done_key):
                 continue
             try:
-                action(account_id)
+                action()
             except Exception as exc:
                 summary[failure_key] += 1
                 self._record_error(summary, item, stage, str(exc))
@@ -352,23 +419,52 @@ class Sub2ApiSyncService:
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ValueError("本地 Sub2API 导入快照无效") from exc
 
+    def _clear_pending_import(self, item: AccountRecord, overview: dict) -> None:
+        keys = (
+            IMPORT_GROUP_ID_KEY,
+            IMPORT_KNOWN_IDS_KEY,
+            IMPORT_FINGERPRINT_KEY,
+            IMPORT_IDENTITY_KEY,
+            IMPORT_MARKER_KEY,
+            IMPORT_RECONCILE_BLOCKED_KEY,
+            INSTANCE_URL_KEY,
+        )
+        updates = {key: "" for key in keys}
+        overview.update(updates)
+        self.repository.update(item.id, AccountUpdateCommand(overview=updates))
+
     def _mark_imported(self, item: AccountRecord, overview: dict, summary: dict) -> None:
         overview[SYNCED_AT_KEY] = _utcnow().isoformat()
-        self.repository.update(item.id, AccountUpdateCommand(overview={SYNCED_AT_KEY: overview[SYNCED_AT_KEY]}))
+        self.repository.update(
+            item.id,
+            AccountUpdateCommand(
+                lifecycle_status="invalid",
+                overview={SYNCED_AT_KEY: overview[SYNCED_AT_KEY]},
+            ),
+        )
         summary["created"] += 1
 
     def _save_account_id(self, item: AccountRecord, overview: dict, account_id: int) -> None:
+        group_id = str(overview.get(IMPORT_GROUP_ID_KEY) or "")
         overview[ACCOUNT_ID_KEY] = str(account_id)
+        overview[SUB2API_GROUP_ID_KEY] = group_id
         overview[IMPORT_GROUP_ID_KEY] = ""
         overview[IMPORT_KNOWN_IDS_KEY] = ""
         overview[IMPORT_FINGERPRINT_KEY] = ""
+        overview[IMPORT_IDENTITY_KEY] = ""
+        overview[IMPORT_MARKER_KEY] = ""
+        overview[IMPORT_RECONCILE_BLOCKED_KEY] = ""
         self.repository.update(
             item.id,
             AccountUpdateCommand(overview={
                 ACCOUNT_ID_KEY: overview[ACCOUNT_ID_KEY],
+                SUB2API_GROUP_ID_KEY: group_id,
                 IMPORT_GROUP_ID_KEY: "",
                 IMPORT_KNOWN_IDS_KEY: "",
                 IMPORT_FINGERPRINT_KEY: "",
+                IMPORT_IDENTITY_KEY: "",
+                IMPORT_MARKER_KEY: "",
+                IMPORT_RECONCILE_BLOCKED_KEY: "",
             }),
         )
 
@@ -385,7 +481,12 @@ class Sub2ApiSyncService:
                         if known_ids is not None:
                             if not self._is_same_instance(item, overview, summary, "postprocess_failed", instance_url):
                                 continue
-                            account_id = client.find_new_account_id(item, known_ids)
+                            account_id = client.find_new_account_id(
+                                item,
+                                known_ids,
+                                identity=str(overview.get(IMPORT_IDENTITY_KEY) or item.email),
+                                import_marker=str(overview.get(IMPORT_MARKER_KEY) or "") or None,
+                            )
                             if account_id is not None:
                                 self._save_account_id(item, overview, account_id)
                     except Exception as exc:
@@ -396,23 +497,42 @@ class Sub2ApiSyncService:
                         if not any(error.get("id") == item.id and error.get("stage") == "instance_mismatch" for error in summary["errors"]):
                             summary["postprocess_failed"] += 1
                         continue
-                if not (overview.get(REFRESHED_AT_KEY) and overview.get(MODELS_SYNCED_AT_KEY)):
+                group_bound = not overview.get(SUB2API_GROUP_ID_KEY) or overview.get(GROUP_BOUND_AT_KEY)
+                if not (group_bound and overview.get(REFRESHED_AT_KEY) and overview.get(MODELS_SYNCED_AT_KEY)):
                     if not self._is_same_instance(item, overview, summary, "postprocess_failed", instance_url):
                         continue
                 self._postprocess(client, item, overview, summary)
                 continue
             attempt_group_id = str(overview.get(IMPORT_GROUP_ID_KEY) or group_id)
-            current_fingerprint = _import_fingerprint(item)
             has_pending_attempt = any(overview.get(key) for key in (IMPORT_GROUP_ID_KEY, IMPORT_KNOWN_IDS_KEY, IMPORT_FINGERPRINT_KEY))
             if has_pending_attempt and not self._is_same_instance(item, overview, summary, "failed", instance_url):
                 continue
-            try:
+            if has_pending_attempt:
+                attempt_identity = str(overview.get(IMPORT_IDENTITY_KEY) or "")
+                attempt_marker = str(overview.get(IMPORT_MARKER_KEY) or "")
                 known_ids = self._stored_import_ids(overview)
+                if not attempt_identity or not attempt_marker or known_ids is None:
+                    summary["failed"] += 1
+                    self._record_error(
+                        summary,
+                        item,
+                        "import_reconcile",
+                        "待重试导入缺少原始身份或关联标记，无法安全对账；已暂停自动重试",
+                    )
+                    continue
+            else:
+                attempt_identity = item.email
+                attempt_marker = uuid.uuid4().hex
+                known_ids = None
+            current_fingerprint = _import_fingerprint(item, attempt_marker)
+            try:
                 if known_ids is None:
-                    known_ids = client.list_matching_account_ids(item)
+                    known_ids = client.list_matching_account_ids(item, identity=attempt_identity)
                     overview[IMPORT_GROUP_ID_KEY] = attempt_group_id
                     overview[IMPORT_KNOWN_IDS_KEY] = json.dumps(sorted(known_ids))
                     overview[IMPORT_FINGERPRINT_KEY] = current_fingerprint
+                    overview[IMPORT_IDENTITY_KEY] = attempt_identity
+                    overview[IMPORT_MARKER_KEY] = attempt_marker
                     overview[INSTANCE_URL_KEY] = instance_url
                     self.repository.update(
                         item.id,
@@ -420,6 +540,8 @@ class Sub2ApiSyncService:
                             IMPORT_GROUP_ID_KEY: attempt_group_id,
                             IMPORT_KNOWN_IDS_KEY: overview[IMPORT_KNOWN_IDS_KEY],
                             IMPORT_FINGERPRINT_KEY: current_fingerprint,
+                            IMPORT_IDENTITY_KEY: attempt_identity,
+                            IMPORT_MARKER_KEY: attempt_marker,
                             INSTANCE_URL_KEY: overview[INSTANCE_URL_KEY],
                         }),
                     )
@@ -432,28 +554,76 @@ class Sub2ApiSyncService:
                     break
                 continue
             stored_fingerprint = str(overview.get(IMPORT_FINGERPRINT_KEY) or "")
-            if stored_fingerprint != current_fingerprint:
+            if has_pending_attempt:
                 try:
-                    account_id = client.find_new_account_id(item, known_ids)
+                    matching_ids = client.list_matching_account_ids(item, identity=attempt_identity)
+                    marked_ids = client.list_matching_account_ids(
+                        item,
+                        identity=attempt_identity,
+                        import_marker=attempt_marker,
+                    )
                 except Exception as exc:
                     summary["failed"] += 1
                     self._record_error(summary, item, "account_lookup", str(exc))
                     continue
-                if account_id is not None:
+                new_marked_ids = marked_ids - known_ids
+                if len(new_marked_ids) == 1:
                     consecutive_failures = 0
                     self._mark_imported(item, overview, summary)
-                    self._save_account_id(item, overview, account_id)
+                    self._save_account_id(item, overview, next(iter(new_marked_ids)))
                     self._postprocess(client, item, overview, summary)
                     continue
+                if len(new_marked_ids) > 1:
+                    summary["failed"] += 1
+                    self._record_error(
+                        summary,
+                        item,
+                        "import_reconcile",
+                        "待重试导入关联到多个远端账号；为避免操作错误账号，已暂停自动重试",
+                    )
+                    continue
+                unowned_ids = matching_ids - known_ids - marked_ids
+                if unowned_ids:
+                    summary["failed"] += 1
+                    self._record_error(
+                        summary,
+                        item,
+                        "import_reconcile",
+                        "待重试期间出现同身份但无本次关联标记的远端账号；为避免误认或重复创建，已暂停自动重试",
+                    )
+                    continue
+                if overview.get(IMPORT_RECONCILE_BLOCKED_KEY):
+                    summary["failed"] += 1
+                    self._record_error(
+                        summary,
+                        item,
+                        "import_reconcile",
+                        "待重试导入的请求体已变化；为避免幂等记录过期后重复创建，已暂停自动重试",
+                    )
+                    continue
+                if stored_fingerprint != current_fingerprint:
+                    summary["failed"] += 1
+                    self._record_error(
+                        summary,
+                        item,
+                        "import_reconcile",
+                        "待重试导入的账号凭据已变化；为避免同一幂等键在远端过期后重复创建，已暂停自动重试",
+                    )
+                    overview[IMPORT_RECONCILE_BLOCKED_KEY] = _utcnow().isoformat()
+                    self.repository.update(
+                        item.id,
+                        AccountUpdateCommand(overview={IMPORT_RECONCILE_BLOCKED_KEY: overview[IMPORT_RECONCILE_BLOCKED_KEY]}),
+                    )
+                    continue
+            try:
+                ok, message = client.import_account(item, attempt_group_id, attempt_marker)
+            except Sub2ApiImportRejected as exc:
+                if not has_pending_attempt:
+                    self._clear_pending_import(item, overview)
                 summary["failed"] += 1
-                self._record_error(
-                    summary,
-                    item,
-                    "import_reconcile",
-                    "待重试导入的账号凭据已变化，且无法唯一识别原导入结果；为避免重复创建，已暂停自动重试",
-                )
+                self._record_error(summary, item, "import", str(exc))
+                consecutive_failures = 0
                 continue
-            ok, message = client.import_account(item, attempt_group_id)
             if not ok:
                 consecutive_failures += 1
                 summary["failed"] += 1
@@ -466,7 +636,12 @@ class Sub2ApiSyncService:
             consecutive_failures = 0
             self._mark_imported(item, overview, summary)
             try:
-                account_id = client.find_new_account_id(item, known_ids)
+                account_id = client.find_new_account_id(
+                    item,
+                    known_ids,
+                    identity=attempt_identity,
+                    import_marker=attempt_marker,
+                )
             except Exception as exc:
                 account_id = None
                 self._record_error(summary, item, "account_lookup", str(exc))
@@ -519,11 +694,11 @@ class Sub2ApiAutoSync:
         while not self._stop.wait(AUTO_SYNC_TICK_SECONDS):
             try:
                 result = self.tick(time.monotonic())
-                if result and any(result[key] for key in ("created", "failed", "refresh_failed", "model_sync_failed", "postprocess_failed")):
+                if result and any(result[key] for key in ("created", "failed", "group_bind_failed", "refresh_failed", "model_sync_failed", "postprocess_failed")):
                     print(
                         f"[Sub2API] 定时导入: 新增 {result['created']} 导入失败 {result['failed']} "
-                        f"刷新失败 {result['refresh_failed']} 模型同步失败 {result['model_sync_failed']} "
-                        f"后处理失败 {result['postprocess_failed']}"
+                        f"分组绑定失败 {result['group_bind_failed']} 刷新失败 {result['refresh_failed']} "
+                        f"模型同步失败 {result['model_sync_failed']} 后处理失败 {result['postprocess_failed']}"
                     )
             except Exception as exc:
                 print(f"[Sub2API] 定时导入出错: {exc}")

@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timedelta, timezone
 
 from application.account_exports import AccountExportsService
-from domain.accounts import AccountCreateCommand, AccountExportSelection
+from domain.accounts import AccountCreateCommand, AccountExportSelection, AccountUpdateCommand
 from infrastructure.accounts_repository import AccountsRepository
 
 
@@ -49,6 +49,24 @@ def test_list_accounts_after_create(client):
     data = resp.json()
     assert data["total"] == 1
     assert data["items"][0]["email"] == "test@example.com"
+
+
+def test_sub2api_imported_legacy_account_is_serialized_unavailable(client):
+    account_id = _create_account(client).json()["id"]
+    AccountsRepository().update(
+        account_id,
+        AccountUpdateCommand(overview={"sub2api_synced_at": "2026-09-29T00:00:00+00:00"}),
+    )
+
+    account = client.get("/api/accounts").json()["items"][0]
+
+    assert account["lifecycle_status"] == "invalid"
+    assert account["validity_status"] == "invalid"
+    assert account["display_status"] == "invalid"
+    assert account["display_summary"]["status"]["display"] == "invalid"
+    assert client.get("/api/accounts?status=registered").json()["total"] == 0
+    assert client.get("/api/accounts?status=invalid").json()["total"] == 1
+    assert AccountsRepository().stats().by_lifecycle_status["invalid"] == 1
 
 
 def test_get_account_by_id(client):

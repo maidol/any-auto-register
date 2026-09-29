@@ -60,6 +60,8 @@ def _to_record(model: AccountModel, graph: dict | None = None) -> AccountRecord:
     plan_state = graph.get("plan_state") or "unknown"
     plan_name = graph.get("plan_name") or ""
     display_status = graph.get("display_status") or "registered"
+    if overview.get("sub2api_synced_at"):
+        lifecycle_status = validity_status = display_status = "invalid"
     provider_resources = list(graph.get("provider_resources") or [])
     return AccountRecord(
         id=int(model.id or 0),

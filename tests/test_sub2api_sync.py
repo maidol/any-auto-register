@@ -4,8 +4,11 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
+from requests import Timeout
+from sqlmodel import Session
 
 from application import sub2api_sync as s2a
+from core.db import AccountModel, engine
 from core.config_store import config_store
 from domain.accounts import AccountCreateCommand, AccountExportSelection, AccountUpdateCommand
 from infrastructure.accounts_repository import AccountsRepository
@@ -40,7 +43,10 @@ class FakeClient:
         self.groups: list[str] = []
         self.calls: list[tuple[str, str]] = []
         self.account_ids: dict[str, set[int]] = {}
+        self.account_markers: dict[int, str] = {}
         self.next_id = 100
+        self.group_bind_failures = 0
+        self.reject_next_import = False
         self.refresh_failures = 0
         self.model_sync_failures = 0
         self.ambiguous_identity = False
@@ -48,21 +54,36 @@ class FakeClient:
         self.created_after_timeout: set[str] = set()
         self.last_credentials: dict[str, str] = {}
 
-    def list_matching_account_ids(self, item):
-        return set(self.account_ids.get(item.email, set()))
+    def list_matching_account_ids(self, item, *, identity=None, import_marker=None):
+        search_identity = identity or item.email
+        account_ids = set(self.account_ids.get(search_identity, set()))
+        if import_marker:
+            if self.ambiguous_identity:
+                self.account_markers[self.next_id] = import_marker
+                account_ids.add(self.next_id)
+                self.next_id += 1
+            account_ids = {account_id for account_id in account_ids if self.account_markers.get(account_id) == import_marker}
+        return account_ids
 
-    def import_account(self, item, group_id):
+    def import_account(self, item, group_id, import_marker=""):
         self.pushed.append(item.email)
         self.groups.append(group_id)
+        if self.reject_next_import:
+            self.reject_next_import = False
+            raise s2a.Sub2ApiImportRejected("import permission rejected")
         fingerprint = repr(item.credentials or [])
         previous = self.last_credentials.get(item.email)
         changed_payload = previous is not None and previous != fingerprint
         result = self.results.pop(0) if self.results else (True, "")
         if result[0] and (item.email not in self.created_after_timeout or changed_payload):
-            self.account_ids.setdefault(item.email, set()).add(self.next_id)
+            account_id = self.next_id
+            self.account_ids.setdefault(item.email, set()).add(account_id)
+            self.account_markers[account_id] = import_marker
             self.next_id += 1
         elif not result[0] and self.create_on_failure:
-            self.account_ids.setdefault(item.email, set()).add(self.next_id)
+            account_id = self.next_id
+            self.account_ids.setdefault(item.email, set()).add(account_id)
+            self.account_markers[account_id] = import_marker
             self.next_id += 1
             self.created_after_timeout.add(item.email)
             self.create_on_failure = False
@@ -70,12 +91,17 @@ class FakeClient:
         self.calls.append(("import", item.email))
         return result
 
-    def find_new_account_id(self, item, known_ids):
-        new_ids = self.list_matching_account_ids(item) - known_ids
-        if self.ambiguous_identity:
-            new_ids.add(self.next_id)
-            self.next_id += 1
+    def find_new_account_id(self, item, known_ids, *, identity=None, import_marker=None):
+        new_ids = self.list_matching_account_ids(
+            item, identity=identity, import_marker=import_marker
+        ) - known_ids
         return next(iter(new_ids)) if len(new_ids) == 1 else None
+
+    def bind_account_group(self, account_id, group_id):
+        self.calls.append(("bind_group", f"{account_id}:{group_id}"))
+        if self.group_bind_failures:
+            self.group_bind_failures -= 1
+            raise ValueError("group bind failed")
 
     def refresh_account(self, account_id):
         self.calls.append(("refresh", str(account_id)))
@@ -124,6 +150,33 @@ def test_client_posts_wrapped_payload_with_admin_key_and_idempotency_key():
     assert kwargs["json"]["data"]["proxies"] == []
 
 
+def test_client_includes_import_marker_in_account_extra():
+    account_id = _create("marked@test.com")
+    item = AccountsRepository().get(account_id)
+    response = _response(200, {"code": 0, "data": {"account_created": 1}})
+
+    with patch("application.sub2api_sync.requests.post", return_value=response) as post:
+        s2a.Sub2ApiClient("http://s2a.local", "admin-key").import_account(item, "12", "marker-123")
+
+    payload = post.call_args.kwargs["json"]["data"]["accounts"][0]
+    assert payload["extra"][s2a.IMPORT_MARKER_FIELD] == "marker-123"
+
+
+def test_client_binds_group_with_account_update_only():
+    client = s2a.Sub2ApiClient("http://s2a.local/", "admin-key")
+    response = _response(200, {"code": 0, "data": {}})
+
+    with patch("application.sub2api_sync.requests.put", return_value=response) as put:
+        client.bind_account_group(11, "12")
+
+    put.assert_called_once_with(
+        "http://s2a.local/api/v1/admin/accounts/11",
+        json={"group_ids": [12]},
+        headers={"x-api-key": "admin-key"},
+        timeout=s2a.REQUEST_TIMEOUT_SECONDS,
+    )
+
+
 def test_client_idempotency_key_is_stable_for_same_account():
     account_id = _create("a@test.com")
     item = AccountsRepository().get(account_id)
@@ -131,6 +184,18 @@ def test_client_idempotency_key_is_stable_for_same_account():
     assert s2a._idempotency_key(item, data, "12") == s2a._idempotency_key(item, data, "12")
     assert s2a._idempotency_key(item, data, "12") != s2a._idempotency_key(item, data, "13")
     assert len(s2a._idempotency_key(item, data, "12")) <= 128
+
+
+def test_idempotency_key_stays_stable_within_marked_import_attempt():
+    account_id = _create("attempt-key@test.com")
+    item = AccountsRepository().get(account_id)
+    first_data = s2a._sub2api_payload(item, "marker-123")
+    changed_data = {**first_data, "updated": True}
+
+    first_key = s2a._idempotency_key(item, first_data, "12", "marker-123")
+
+    assert first_key == s2a._idempotency_key(item, changed_data, "12", "marker-123")
+    assert first_key != s2a._idempotency_key(item, changed_data, "13", "marker-123")
 
 
 def test_client_treats_http200_without_created_account_as_failure():
@@ -143,25 +208,87 @@ def test_client_treats_http200_without_created_account_as_failure():
     }
 
     with patch("application.sub2api_sync.requests.post", return_value=_response(200, body)):
-        assert s2a.Sub2ApiClient("http://s2a.local", "k").import_account(item, "12") == (False, "bad credentials")
+        with pytest.raises(s2a.Sub2ApiImportRejected, match="bad credentials"):
+            s2a.Sub2ApiClient("http://s2a.local", "k").import_account(item, "12")
 
 
 def test_client_reports_http_error_message():
     account_id = _create("a@test.com")
     item = AccountsRepository().get(account_id)
     with patch("application.sub2api_sync.requests.post", return_value=_response(401, {"code": 401, "message": "invalid admin api key"})):
+        with pytest.raises(s2a.Sub2ApiImportRejected, match="401.*invalid admin api key"):
+            s2a.Sub2ApiClient("http://s2a.local", "k").import_account(item, "12")
+
+
+def test_client_preserves_uncertain_in_progress_idempotency_conflict():
+    account_id = _create("in-progress@test.com")
+    item = AccountsRepository().get(account_id)
+
+    with patch(
+        "application.sub2api_sync.requests.post",
+        return_value=_response(409, {"code": 409, "message": "request is still processing"}),
+    ):
         ok, message = s2a.Sub2ApiClient("http://s2a.local", "k").import_account(item, "12")
+
     assert ok is False
-    assert "401" in message and "invalid admin api key" in message
+    assert "still processing" in message
 
 
 def test_client_skips_account_without_tokens_without_request():
     account_id = _create("empty@test.com", access_token="", refresh_token="")
     item = AccountsRepository().get(account_id)
     with patch("application.sub2api_sync.requests.post") as post:
-        ok, _message = s2a.Sub2ApiClient("http://s2a.local", "k").import_account(item, "12")
-    assert ok is False
+        with pytest.raises(s2a.Sub2ApiImportRejected, match="缺少 access_token"):
+            s2a.Sub2ApiClient("http://s2a.local", "k").import_account(item, "12")
     post.assert_not_called()
+
+
+def test_known_import_rejection_clears_pending_snapshot():
+    _configure()
+    account_id = _create("empty-import@test.com", access_token="", refresh_token="")
+    client = s2a.Sub2ApiClient("http://s2a.local", "admin-key")
+    service = s2a.Sub2ApiSyncService(client_factory=lambda _url, _key: client)
+    selection = AccountExportSelection(platform="chatgpt", ids=[account_id])
+    accounts_response = _response(200, {"code": 0, "data": {"items": [], "pages": 1}})
+
+    with patch("application.sub2api_sync.requests.get", return_value=accounts_response), patch(
+        "application.sub2api_sync.requests.post"
+    ) as post:
+        result = service.sync_selected(selection)
+
+    overview = AccountsRepository().get(account_id).overview
+    assert result["failed"] == 1
+    assert result["errors"][0]["stage"] == "import"
+    assert not overview.get(s2a.IMPORT_GROUP_ID_KEY)
+    assert not overview.get(s2a.IMPORT_KNOWN_IDS_KEY)
+    assert not overview.get(s2a.IMPORT_FINGERPRINT_KEY)
+    assert not overview.get(s2a.IMPORT_IDENTITY_KEY)
+    assert not overview.get(s2a.IMPORT_MARKER_KEY)
+    assert not s2a.Sub2ApiSyncService._has_pending_sub2api_work(AccountsRepository().get(account_id))
+    post.assert_not_called()
+
+
+def test_definite_rejection_of_retry_preserves_prior_uncertain_snapshot():
+    _configure()
+    account_id = _create("rejected-retry@test.com")
+    client = FakeClient([(False, "request timed out")])
+    service = _service(client)
+    selection = AccountExportSelection(platform="chatgpt", ids=[account_id])
+
+    first = service.sync_selected(selection)
+    client.reject_next_import = True
+    AccountsRepository().update(
+        account_id,
+        AccountUpdateCommand(credentials={"access_token": "at_rotated", "refresh_token": "rt_rotated"}),
+    )
+    second = service.sync_selected(selection)
+
+    overview = AccountsRepository().get(account_id).overview
+    assert first["failed"] == 1
+    assert second["failed"] == 1
+    assert overview[s2a.IMPORT_MARKER_KEY]
+    assert overview[s2a.IMPORT_IDENTITY_KEY] == "rejected-retry@test.com"
+    assert s2a.Sub2ApiSyncService._has_pending_sub2api_work(AccountsRepository().get(account_id))
 
 
 # ── 手动导入 ─────────────────────────────────────────────────
@@ -192,7 +319,13 @@ def test_manual_import_binds_group_and_runs_refresh_then_model_sync():
 
     overview = AccountsRepository().get(account_id).overview
     assert client.groups == ["12"]
-    assert client.calls == [("import", "grouped@test.com"), ("refresh", "100"), ("models", "100")]
+    assert client.calls == [
+        ("import", "grouped@test.com"),
+        ("bind_group", "100:12"),
+        ("refresh", "100"),
+        ("models", "100"),
+    ]
+    assert overview["sub2api_group_bound_at"]
     assert overview[s2a.SYNCED_AT_KEY]
     assert overview[s2a.ACCOUNT_ID_KEY] == "100"
     assert overview[s2a.REFRESHED_AT_KEY]
@@ -200,6 +333,53 @@ def test_manual_import_binds_group_and_runs_refresh_then_model_sync():
     assert result["created"] == 1
     assert result["refresh_failed"] == 0
     assert result["model_sync_failed"] == 0
+
+
+def test_manual_import_binds_group_before_refresh_and_model_sync():
+    _configure()
+    account_id = _create("bind-order@test.com")
+    client = FakeClient()
+
+    result = _service(client).sync_selected(AccountExportSelection(platform="chatgpt", ids=[account_id]))
+
+    overview = AccountsRepository().get(account_id).overview
+    assert client.calls == [
+        ("import", "bind-order@test.com"),
+        ("bind_group", "100:12"),
+        ("refresh", "100"),
+        ("models", "100"),
+    ]
+    assert overview["sub2api_group_id"] == "12"
+    assert overview["sub2api_group_bound_at"]
+    assert result["group_bind_failed"] == 0
+
+
+def test_group_binding_failure_retries_without_reimport_or_repeating_completed_stages():
+    _configure()
+    account_id = _create("bind-retry@test.com")
+    client = FakeClient()
+    client.group_bind_failures = 1
+    service = _service(client)
+    selection = AccountExportSelection(platform="chatgpt", ids=[account_id])
+
+    first = service.sync_selected(selection)
+    first_record = AccountsRepository().get(account_id)
+    first_overview = first_record.overview
+    assert s2a.Sub2ApiSyncService._has_pending_sub2api_work(first_record)
+    second = service.sync_selected(selection)
+
+    overview = AccountsRepository().get(account_id).overview
+    assert first["group_bind_failed"] == 1
+    assert not first_overview.get("sub2api_group_bound_at")
+    assert second["group_bind_failed"] == 0
+    assert overview["sub2api_group_bound_at"]
+    assert client.calls == [
+        ("import", "bind-retry@test.com"),
+        ("bind_group", "100:12"),
+        ("refresh", "100"),
+        ("models", "100"),
+        ("bind_group", "100:12"),
+    ]
 
 
 def test_manual_sync_rejects_missing_default_group_before_import():
@@ -230,6 +410,7 @@ def test_postprocess_retry_does_not_import_account_twice():
     assert client.pushed == ["retry@test.com"]
     assert client.calls == [
         ("import", "retry@test.com"),
+        ("bind_group", "100:12"),
         ("refresh", "100"),
         ("models", "100"),
         ("refresh", "100"),
@@ -257,11 +438,11 @@ def test_idempotent_import_replay_resolves_account_from_original_snapshot():
     assert first["failed"] == 1
     assert second["created"] == 1 and second["postprocess_failed"] == 0
     assert overview[s2a.ACCOUNT_ID_KEY] == "100"
-    assert client.groups == ["12", "12"]
+    assert client.groups == ["12"]
     assert len(client.account_ids["timeout@test.com"]) == 1
     assert client.calls == [
         ("import", "timeout@test.com"),
-        ("import", "timeout@test.com"),
+        ("bind_group", "100:12"),
         ("refresh", "100"),
         ("models", "100"),
     ]
@@ -289,9 +470,130 @@ def test_import_retry_after_credential_change_reconciles_without_duplicate_post(
     assert len(client.account_ids["changed-token@test.com"]) == 1
     assert client.calls == [
         ("import", "changed-token@test.com"),
+        ("bind_group", "100:12"),
         ("refresh", "100"),
         ("models", "100"),
     ]
+
+
+def test_pending_import_with_changed_token_and_no_remote_record_blocks_repost():
+    _configure()
+    account_id = _create("no-remote-record@test.com")
+    client = FakeClient([(False, "request failed"), (True, "")])
+    service = _service(client)
+    selection = AccountExportSelection(platform="chatgpt", ids=[account_id])
+
+    first = service.sync_selected(selection)
+    AccountsRepository().update(
+        account_id,
+        AccountUpdateCommand(credentials={"access_token": "at_rotated", "refresh_token": "rt_rotated"}),
+    )
+    second = service.sync_selected(selection)
+
+    overview = AccountsRepository().get(account_id).overview
+    assert first["failed"] == 1
+    assert second["failed"] == 1
+    assert second["errors"][0]["stage"] == "import_reconcile"
+    assert overview[s2a.IMPORT_RECONCILE_BLOCKED_KEY]
+    assert not overview.get(s2a.ACCOUNT_ID_KEY)
+    assert client.pushed == ["no-remote-record@test.com"]
+
+
+def test_changed_pending_payload_is_blocked_before_second_post():
+    _configure()
+    account_id = _create("stable-key-retry@test.com")
+    client = s2a.Sub2ApiClient("http://s2a.local", "admin-key")
+    service = s2a.Sub2ApiSyncService(client_factory=lambda _url, _key: client)
+    selection = AccountExportSelection(platform="chatgpt", ids=[account_id])
+    accounts_response = _response(200, {"code": 0, "data": {"items": [], "pages": 1}})
+    post_responses = [Timeout("timed out")]
+
+    with patch("application.sub2api_sync.requests.get", return_value=accounts_response), patch(
+        "application.sub2api_sync.requests.post", side_effect=post_responses
+    ) as post:
+        first = service.sync_selected(selection)
+        AccountsRepository().update(
+            account_id,
+            AccountUpdateCommand(credentials={"access_token": "at_rotated", "refresh_token": "rt_rotated"}),
+        )
+        second = service.sync_selected(selection)
+
+    assert first["failed"] == 1 and second["failed"] == 1
+    assert second["errors"][0]["stage"] == "import_reconcile"
+    assert post.call_count == 1
+    overview = AccountsRepository().get(account_id).overview
+    assert overview[s2a.IMPORT_MARKER_KEY]
+    assert overview[s2a.IMPORT_RECONCILE_BLOCKED_KEY]
+
+
+def test_pending_import_with_multiple_new_remote_records_pauses_without_repost():
+    _configure()
+    account_id = _create("ambiguous-retry@test.com")
+    client = FakeClient([(False, "request failed")])
+    service = _service(client)
+    selection = AccountExportSelection(platform="chatgpt", ids=[account_id])
+
+    first = service.sync_selected(selection)
+    AccountsRepository().update(
+        account_id,
+        AccountUpdateCommand(credentials={"access_token": "at_rotated", "refresh_token": "rt_rotated"}),
+    )
+    client.account_ids["ambiguous-retry@test.com"] = {700, 701}
+    second = service.sync_selected(selection)
+
+    assert first["failed"] == 1
+    assert second["failed"] == 1
+    assert second["errors"][0]["stage"] == "import_reconcile"
+    assert client.pushed == ["ambiguous-retry@test.com"]
+
+
+def test_pending_import_reconciles_using_original_email_after_local_email_changes():
+    _configure()
+    account_id = _create("original-email@test.com")
+    client = FakeClient([(False, "request timed out")])
+    client.create_on_failure = True
+    service = _service(client)
+    selection = AccountExportSelection(platform="chatgpt", ids=[account_id])
+
+    first = service.sync_selected(selection)
+    with Session(engine) as session:
+        account = session.get(AccountModel, account_id)
+        account.email = "rotated-email@test.com"
+        session.add(account)
+        session.commit()
+    AccountsRepository().update(
+        account_id,
+        AccountUpdateCommand(credentials={"access_token": "at_rotated", "refresh_token": "rt_rotated"}),
+    )
+    second = service.sync_selected(selection)
+
+    assert first["failed"] == 1
+    assert second["created"] == 1
+    assert client.pushed == ["original-email@test.com"]
+    assert len(client.account_ids["original-email@test.com"]) == 1
+    assert not client.account_ids.get("rotated-email@test.com")
+
+
+def test_pending_import_does_not_adopt_unrelated_new_same_email_account():
+    _configure()
+    account_id = _create("unrelated-same-email@test.com")
+    client = FakeClient([(False, "request timed out")])
+    service = _service(client)
+    selection = AccountExportSelection(platform="chatgpt", ids=[account_id])
+
+    first = service.sync_selected(selection)
+    client.account_ids["unrelated-same-email@test.com"] = {700}
+    AccountsRepository().update(
+        account_id,
+        AccountUpdateCommand(credentials={"access_token": "at_rotated", "refresh_token": "rt_rotated"}),
+    )
+    second = service.sync_selected(selection)
+
+    assert first["failed"] == 1
+    assert second["failed"] == 1
+    assert second["errors"][0]["stage"] == "import_reconcile"
+    assert client.pushed == ["unrelated-same-email@test.com"]
+    assert client.account_ids["unrelated-same-email@test.com"] == {700}
 
 
 def test_postprocess_retry_never_targets_a_different_sub2api_instance():
@@ -315,6 +617,7 @@ def test_postprocess_retry_never_targets_a_different_sub2api_instance():
     assert third["model_sync_failed"] == 0
     assert client.calls == [
         ("import", "instance-change@test.com"),
+        ("bind_group", "100:12"),
         ("refresh", "100"),
         ("models", "100"),
         ("models", "100"),
@@ -347,6 +650,7 @@ def test_instance_url_snapshot_survives_config_change_during_client_creation():
     assert second["postprocess_failed"] == 1
     assert client.calls == [
         ("import", "instance-race@test.com"),
+        ("bind_group", "100:12"),
         ("refresh", "100"),
         ("models", "100"),
     ]
@@ -368,6 +672,7 @@ def test_model_sync_retry_does_not_repeat_refresh_or_import():
     assert client.pushed == ["models-retry@test.com"]
     assert client.calls == [
         ("import", "models-retry@test.com"),
+        ("bind_group", "100:12"),
         ("refresh", "100"),
         ("models", "100"),
         ("models", "100"),
@@ -382,7 +687,9 @@ def test_ambiguous_import_identity_records_success_without_postprocessing():
 
     result = _service(client).sync_selected(AccountExportSelection(platform="chatgpt", ids=[account_id]))
 
-    overview = AccountsRepository().get(account_id).overview
+    imported = AccountsRepository().get(account_id)
+    overview = imported.overview
+    assert imported.lifecycle_status == "invalid"
     assert overview[s2a.SYNCED_AT_KEY]
     assert not overview.get(s2a.ACCOUNT_ID_KEY)
     assert result["created"] == 1
@@ -480,7 +787,7 @@ def test_auto_sync_only_pushes_accounts_created_after_enable():
 
     assert client.pushed == ["new@test.com"]
     assert second["created"] == 1
-    assert third["created"] == 0 and third["skipped"] == 1
+    assert third["total"] == 0 and third["created"] == 0
 
 
 def test_auto_sync_retries_pending_model_sync_after_status_changes():
@@ -493,13 +800,14 @@ def test_auto_sync_retries_pending_model_sync_after_status_changes():
     service = _service(client)
 
     first = service.sync_new_accounts()
-    AccountsRepository().update(account_id, AccountUpdateCommand(lifecycle_status="failed"))
+    AccountsRepository().update(account_id, AccountUpdateCommand(lifecycle_status="invalid"))
     second = service.sync_new_accounts()
 
     assert first["created"] == 1 and first["model_sync_failed"] == 1
     assert second["skipped"] == 1 and second["model_sync_failed"] == 0
     assert client.calls == [
         ("import", "status-change@test.com"),
+        ("bind_group", "100:12"),
         ("refresh", "100"),
         ("models", "100"),
         ("models", "100"),
@@ -567,6 +875,29 @@ def test_client_rejects_invalid_group_list_response():
     with patch("application.sub2api_sync.requests.get", return_value=_response(200, {"code": 1, "data": []})):
         with pytest.raises(s2a.Sub2ApiClientError, match="分组"):
             client.list_groups()
+
+
+def test_client_filters_account_ids_by_original_identity_and_import_marker():
+    account_id = _create("marked-search@test.com")
+    item = AccountsRepository().get(account_id)
+    body = {
+        "code": 0,
+        "data": {
+            "items": [
+                {"id": 11, "name": "marked-search@test.com", "extra": {s2a.IMPORT_MARKER_FIELD: "marker-123"}},
+                {"id": 12, "name": "marked-search@test.com", "extra": {s2a.IMPORT_MARKER_FIELD: "other-marker"}},
+                {"id": 13, "name": "marked-search@test.com", "extra": {}},
+            ],
+            "total": 3,
+            "page": 1,
+            "page_size": 100,
+            "pages": 1,
+        },
+    }
+    client = s2a.Sub2ApiClient("http://s2a.local", "admin-key")
+
+    with patch("application.sub2api_sync.requests.get", return_value=_response(200, body)):
+        assert client.list_matching_account_ids(item, identity="marked-search@test.com", import_marker="marker-123") == {11}
 
 
 def test_client_finds_new_account_id_by_exact_identity():
