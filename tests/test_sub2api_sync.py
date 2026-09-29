@@ -1005,9 +1005,13 @@ def test_client_does_not_choose_ambiguous_new_account_id():
 
 def test_client_refreshes_account_and_syncs_upstream_models():
     client = s2a.Sub2ApiClient("http://s2a.local", "admin-key")
-    success = _response(200, {"code": 0, "data": {"models": ["model-a"]}})
+    success = _response(200, {"code": 0, "data": {"models": ["model-a", " model-b "]}})
+    account = _response(200, {"code": 0, "data": {"credentials": {"plan_type": "plus", "model_mapping": {"old": "old"}}}})
+    saved = _response(200, {"code": 0, "data": {}})
 
-    with patch("application.sub2api_sync.requests.post", return_value=success) as post:
+    with patch("application.sub2api_sync.requests.post", return_value=success) as post, patch(
+        "application.sub2api_sync.requests.get", return_value=account
+    ) as get, patch("application.sub2api_sync.requests.put", return_value=saved) as put:
         client.refresh_account(11)
         client.sync_upstream_models(11)
 
@@ -1018,6 +1022,27 @@ def test_client_refreshes_account_and_syncs_upstream_models():
     for call in post.call_args_list:
         assert call.kwargs["headers"] == {"x-api-key": "admin-key"}
         assert call.kwargs["timeout"] == s2a.REQUEST_TIMEOUT_SECONDS
+    assert get.call_args.args[0] == "http://s2a.local/api/v1/admin/accounts/11"
+    # 先清空再同步：白名单被上游列表整体替换，其它非敏感凭据字段原样带回。
+    put.assert_called_once_with(
+        "http://s2a.local/api/v1/admin/accounts/11",
+        json={"credentials": {"plan_type": "plus", "model_mapping": {"model-a": "model-a", "model-b": "model-b"}}},
+        headers={"x-api-key": "admin-key"},
+        timeout=s2a.REQUEST_TIMEOUT_SECONDS,
+    )
+
+
+def test_sync_upstream_models_with_empty_list_is_failure_without_saving():
+    client = s2a.Sub2ApiClient("http://s2a.local", "admin-key")
+    empty = _response(200, {"code": 0, "data": {"models": []}})
+
+    with patch("application.sub2api_sync.requests.post", return_value=empty), patch(
+        "application.sub2api_sync.requests.put"
+    ) as put:
+        with pytest.raises(ValueError, match="模型"):
+            client.sync_upstream_models(11)
+
+    put.assert_not_called()
 
 
 def test_config_repository_persists_sub2api_default_group_id():

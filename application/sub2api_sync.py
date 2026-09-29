@@ -221,12 +221,13 @@ class Sub2ApiClient:
         new_ids = self.list_matching_account_ids(item, identity=identity, import_marker=import_marker) - known_ids
         return next(iter(new_ids)) if len(new_ids) == 1 else None
 
-    def _post_account_action(self, path: str) -> None:
+    def _account_action(self, method: str, path: str, **kwargs) -> dict:
         try:
-            resp = requests.post(
+            resp = getattr(requests, method)(
                 f"{self.base_url}{path}",
                 headers={"x-api-key": self.admin_key},
                 timeout=self.timeout,
+                **kwargs,
             )
             body = resp.json()
         except Exception as exc:
@@ -234,6 +235,10 @@ class Sub2ApiClient:
         if resp.status_code != 200 or not isinstance(body, dict) or body.get("code") != 0:
             message = body.get("message") if isinstance(body, dict) else resp.text[:200]
             raise ValueError(f"Sub2API 操作失败: HTTP {resp.status_code}: {message or resp.text[:200]}")
+        return body
+
+    def _post_account_action(self, path: str) -> dict:
+        return self._account_action("post", path)
 
     def bind_account_group(self, account_id: int, group_id: str) -> None:
         try:
@@ -254,7 +259,20 @@ class Sub2ApiClient:
         self._post_account_action(f"/api/v1/admin/accounts/{account_id}/refresh")
 
     def sync_upstream_models(self, account_id: int) -> None:
-        self._post_account_action(f"/api/v1/admin/accounts/{account_id}/models/sync-upstream")
+        # sync-upstream 只返回模型列表（并写能力元数据）；账号可用模型白名单
+        # credentials.model_mapping 由 Sub2API 前端拿结果后自行保存，这里照做：
+        # 先清空（整体替换），再写入上游列表。GET 回来的凭据已脱敏，PUT 时服务端保留 token。
+        body = self._post_account_action(f"/api/v1/admin/accounts/{account_id}/models/sync-upstream")
+        data = body.get("data")
+        models = [str(m).strip() for m in (data.get("models") if isinstance(data, dict) else None) or []]
+        models = list(dict.fromkeys(m for m in models if m))
+        if not models:
+            raise ValueError("Sub2API 未返回上游支持的模型")
+        path = f"/api/v1/admin/accounts/{account_id}"
+        account = self._account_action("get", path).get("data")
+        credentials = dict(account.get("credentials") or {}) if isinstance(account, dict) else {}
+        credentials["model_mapping"] = {model: model for model in models}
+        self._account_action("put", path, json={"credentials": credentials})
 
 
 class Sub2ApiSyncService:
