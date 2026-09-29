@@ -29,6 +29,7 @@ IMPORT_FINGERPRINT_KEY = "sub2api_import_fingerprint"
 IMPORT_IDENTITY_KEY = "sub2api_import_identity"
 IMPORT_MARKER_KEY = "sub2api_import_marker"
 IMPORT_RECONCILE_BLOCKED_KEY = "sub2api_import_reconcile_blocked"
+IMPORT_ATTEMPTED_AT_KEY = "sub2api_import_attempted_at"
 IMPORT_MARKER_FIELD = "any_auto_register_import_marker"
 INSTANCE_URL_KEY = "sub2api_instance_url"
 REFRESHED_AT_KEY = "sub2api_refreshed_at"
@@ -41,6 +42,8 @@ DEFAULT_INTERVAL_MINUTES = 10
 REQUEST_TIMEOUT_SECONDS = 20
 MAX_CONSECUTIVE_FAILURES = 3
 AUTO_SYNC_TICK_SECONDS = 60
+# 上次导入请求可能还在 Sub2API 那边处理；过了这段时间仍查不到带标记的记录，才认定上次没建成。
+IMPORT_RETRY_GRACE_SECONDS = max(300, 3 * REQUEST_TIMEOUT_SECONDS)
 
 # 手动和定时可能同时跑；不串行的话同一个账号会在两边各推一次，而 sub2api 不去重。
 _SYNC_LOCK = threading.Lock()
@@ -419,6 +422,17 @@ class Sub2ApiSyncService:
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ValueError("本地 Sub2API 导入快照无效") from exc
 
+    @staticmethod
+    def _attempted_at(overview: dict) -> datetime | None:
+        # 缺失或无法解析都当作「很久以前」：旧版本留下的挂起尝试没有这个键。
+        raw = str(overview.get(IMPORT_ATTEMPTED_AT_KEY) or "").strip()
+        if not raw:
+            return None
+        try:
+            return _as_utc(datetime.fromisoformat(raw))
+        except ValueError:
+            return None
+
     def _clear_pending_import(self, item: AccountRecord, overview: dict) -> None:
         keys = (
             IMPORT_GROUP_ID_KEY,
@@ -427,6 +441,7 @@ class Sub2ApiSyncService:
             IMPORT_IDENTITY_KEY,
             IMPORT_MARKER_KEY,
             IMPORT_RECONCILE_BLOCKED_KEY,
+            IMPORT_ATTEMPTED_AT_KEY,
             INSTANCE_URL_KEY,
         )
         updates = {key: "" for key in keys}
@@ -454,6 +469,7 @@ class Sub2ApiSyncService:
         overview[IMPORT_IDENTITY_KEY] = ""
         overview[IMPORT_MARKER_KEY] = ""
         overview[IMPORT_RECONCILE_BLOCKED_KEY] = ""
+        overview[IMPORT_ATTEMPTED_AT_KEY] = ""
         self.repository.update(
             item.id,
             AccountUpdateCommand(overview={
@@ -465,6 +481,7 @@ class Sub2ApiSyncService:
                 IMPORT_IDENTITY_KEY: "",
                 IMPORT_MARKER_KEY: "",
                 IMPORT_RECONCILE_BLOCKED_KEY: "",
+                IMPORT_ATTEMPTED_AT_KEY: "",
             }),
         )
 
@@ -520,41 +537,6 @@ class Sub2ApiSyncService:
                         "待重试导入缺少原始身份或关联标记，无法安全对账；已暂停自动重试",
                     )
                     continue
-            else:
-                attempt_identity = item.email
-                attempt_marker = uuid.uuid4().hex
-                known_ids = None
-            current_fingerprint = _import_fingerprint(item, attempt_marker)
-            try:
-                if known_ids is None:
-                    known_ids = client.list_matching_account_ids(item, identity=attempt_identity)
-                    overview[IMPORT_GROUP_ID_KEY] = attempt_group_id
-                    overview[IMPORT_KNOWN_IDS_KEY] = json.dumps(sorted(known_ids))
-                    overview[IMPORT_FINGERPRINT_KEY] = current_fingerprint
-                    overview[IMPORT_IDENTITY_KEY] = attempt_identity
-                    overview[IMPORT_MARKER_KEY] = attempt_marker
-                    overview[INSTANCE_URL_KEY] = instance_url
-                    self.repository.update(
-                        item.id,
-                        AccountUpdateCommand(overview={
-                            IMPORT_GROUP_ID_KEY: attempt_group_id,
-                            IMPORT_KNOWN_IDS_KEY: overview[IMPORT_KNOWN_IDS_KEY],
-                            IMPORT_FINGERPRINT_KEY: current_fingerprint,
-                            IMPORT_IDENTITY_KEY: attempt_identity,
-                            IMPORT_MARKER_KEY: attempt_marker,
-                            INSTANCE_URL_KEY: overview[INSTANCE_URL_KEY],
-                        }),
-                    )
-            except Exception as exc:
-                consecutive_failures += 1
-                summary["failed"] += 1
-                self._record_error(summary, item, "account_lookup", str(exc))
-                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                    summary["aborted"] = True
-                    break
-                continue
-            stored_fingerprint = str(overview.get(IMPORT_FINGERPRINT_KEY) or "")
-            if has_pending_attempt:
                 try:
                     matching_ids = client.list_matching_account_ids(item, identity=attempt_identity)
                     marked_ids = client.list_matching_account_ids(
@@ -592,29 +574,60 @@ class Sub2ApiSyncService:
                         "待重试期间出现同身份但无本次关联标记的远端账号；为避免误认或重复创建，已暂停自动重试",
                     )
                     continue
-                if overview.get(IMPORT_RECONCILE_BLOCKED_KEY):
+                attempted_at = self._attempted_at(overview)
+                if attempted_at is not None and (_utcnow() - attempted_at).total_seconds() < IMPORT_RETRY_GRACE_SECONDS:
                     summary["failed"] += 1
                     self._record_error(
                         summary,
                         item,
                         "import_reconcile",
-                        "待重试导入的请求体已变化；为避免幂等记录过期后重复创建，已暂停自动重试",
+                        f"上次导入请求可能仍在 Sub2API 处理中；{IMPORT_RETRY_GRACE_SECONDS} 秒后再对账",
                     )
                     continue
-                if stored_fingerprint != current_fingerprint:
-                    summary["failed"] += 1
-                    self._record_error(
-                        summary,
-                        item,
-                        "import_reconcile",
-                        "待重试导入的账号凭据已变化；为避免同一幂等键在远端过期后重复创建，已暂停自动重试",
-                    )
-                    overview[IMPORT_RECONCILE_BLOCKED_KEY] = _utcnow().isoformat()
+                # 过了宽限期，远端仍没有带本次标记的新记录：上次没建成。
+                # 换新标记（也就换了幂等键），用当前载荷重新导入；旧请求万一迟到落库，会作为无标记记录被上面拦下。
+                has_pending_attempt = False
+                attempt_group_id = group_id
+            if not has_pending_attempt:
+                attempt_identity = item.email
+                attempt_marker = uuid.uuid4().hex
+                known_ids = None
+            current_fingerprint = _import_fingerprint(item, attempt_marker)
+            try:
+                if known_ids is None:
+                    known_ids = client.list_matching_account_ids(item, identity=attempt_identity)
+                    overview[IMPORT_GROUP_ID_KEY] = attempt_group_id
+                    overview[IMPORT_KNOWN_IDS_KEY] = json.dumps(sorted(known_ids))
+                    overview[IMPORT_FINGERPRINT_KEY] = current_fingerprint
+                    overview[IMPORT_IDENTITY_KEY] = attempt_identity
+                    overview[IMPORT_MARKER_KEY] = attempt_marker
+                    overview[IMPORT_RECONCILE_BLOCKED_KEY] = ""
+                    overview[INSTANCE_URL_KEY] = instance_url
                     self.repository.update(
                         item.id,
-                        AccountUpdateCommand(overview={IMPORT_RECONCILE_BLOCKED_KEY: overview[IMPORT_RECONCILE_BLOCKED_KEY]}),
+                        AccountUpdateCommand(overview={
+                            IMPORT_GROUP_ID_KEY: attempt_group_id,
+                            IMPORT_KNOWN_IDS_KEY: overview[IMPORT_KNOWN_IDS_KEY],
+                            IMPORT_FINGERPRINT_KEY: current_fingerprint,
+                            IMPORT_IDENTITY_KEY: attempt_identity,
+                            IMPORT_MARKER_KEY: attempt_marker,
+                            IMPORT_RECONCILE_BLOCKED_KEY: "",
+                            INSTANCE_URL_KEY: overview[INSTANCE_URL_KEY],
+                        }),
                     )
-                    continue
+            except Exception as exc:
+                consecutive_failures += 1
+                summary["failed"] += 1
+                self._record_error(summary, item, "account_lookup", str(exc))
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    summary["aborted"] = True
+                    break
+                continue
+            overview[IMPORT_ATTEMPTED_AT_KEY] = _utcnow().isoformat()
+            self.repository.update(
+                item.id,
+                AccountUpdateCommand(overview={IMPORT_ATTEMPTED_AT_KEY: overview[IMPORT_ATTEMPTED_AT_KEY]}),
+            )
             try:
                 ok, message = client.import_account(item, attempt_group_id, attempt_marker)
             except Sub2ApiImportRejected as exc:

@@ -236,7 +236,9 @@ def build_account_display_summary(
     sections.extend(generic_sections)
 
     warnings: list[dict[str, Any]] = []
-    if validity_status == "invalid" or lifecycle_status == "invalid":
+    if overview.get("sub2api_synced_at"):
+        warnings.append({"key": "sub2api_imported", "tone": "danger", "message": "已导入 Sub2API，本系统已停用该账号"})
+    elif validity_status == "invalid" or lifecycle_status == "invalid":
         warnings.append({"key": "invalid", "tone": "danger", "message": "账号当前检测为失效"})
     if validity_status == "unknown":
         warnings.append({"key": "unknown_validity", "tone": "warning", "message": "尚未完成有效性检测"})
@@ -250,6 +252,8 @@ def build_account_display_summary(
         for chip in _safe_list(overview.get("chips"))
         if _text(chip)
     ]
+    if overview.get("sub2api_synced_at"):
+        badges.insert(0, {"label": "已导入 Sub2API · 不可用", "tone": "danger"})
     for resource in provider_resources or []:
         if isinstance(resource, dict) and resource.get("resource_type") == "mailbox" and (resource.get("handle") or resource.get("display_name")):
             badges.append({"label": "邮箱验证", "tone": "muted"})
