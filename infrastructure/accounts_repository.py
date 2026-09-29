@@ -140,7 +140,12 @@ class AccountsRepository:
             records = self._load_records(session, [model])
             return records[0] if records else None
 
-    def select_for_export(self, selection: AccountExportSelection) -> list[AccountRecord]:
+    def select_for_export(
+        self,
+        selection: AccountExportSelection,
+        *,
+        include_failed: bool = False,
+    ) -> list[AccountRecord]:
         with Session(engine) as session:
             statement = select(AccountModel)
             if selection.platform:
@@ -159,7 +164,7 @@ class AccountsRepository:
                 "plan_state": item.plan_state,
                 "validity_status": item.validity_status,
             }, selection.status_filter)]
-        elif selection.select_all:
+        elif selection.select_all and not include_failed:
             # 全选且没按状态筛选时不带出注册失败的账号：它们没有 token，
             # 混进 Sub2API/CPA 导出就是一批空凭据，手动推 Sub2API 时还会
             # 连续失败 3 次触发中止，把排在后面的好账号一起丢掉。

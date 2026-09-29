@@ -12,7 +12,7 @@ class ConfigRepository:
         "cpa_api_url", "cpa_api_key",
         "team_manager_url", "team_manager_key",
         "any2api_url", "any2api_password",
-        "sub2api_url", "sub2api_admin_key", "sub2api_auto_sync", "sub2api_sync_interval_minutes",
+        "sub2api_url", "sub2api_admin_key", "sub2api_default_group_id", "sub2api_auto_sync", "sub2api_sync_interval_minutes",
     }
 
     def __init__(self, definitions: ProviderDefinitionsRepository | None = None):
@@ -40,5 +40,11 @@ class ConfigRepository:
     def update_flat(self, data: dict[str, str]) -> list[str]:
         allowed = self.get_allowed_keys()
         safe = {key: value for key, value in data.items() if key in allowed}
+        if "sub2api_url" in safe:
+            current_url = str(config_store.get("sub2api_url", "") or "").strip().rstrip("/")
+            next_url = str(safe.get("sub2api_url") or "").strip().rstrip("/")
+            if current_url != next_url:
+                # Group IDs belong to a Sub2API instance; never carry one across endpoint changes.
+                safe["sub2api_default_group_id"] = ""
         config_store.set_many(safe)
         return list(safe.keys())
