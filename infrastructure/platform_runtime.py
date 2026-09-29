@@ -6,7 +6,7 @@ from typing import Any
 from sqlmodel import Session
 
 from core.base_platform import RegisterConfig
-from core.account_graph import patch_account_graph
+from core.account_graph import load_account_graphs, patch_account_graph
 from core.db import AccountModel, engine
 from core.platform_accounts import build_platform_account
 from core.registry import get, list_platforms, load_all
@@ -281,6 +281,11 @@ class PlatformRuntime:
             model = session.get(AccountModel, command.account_id)
             if not model or model.platform != command.platform:
                 return ActionExecutionResult(ok=False, error="账号不存在")
+            if command.action_id == "refresh_token":
+                # 已导入 Sub2API 的账号由 Sub2API 负责刷新；本地再换一次会让两边的 refresh_token 互相作废。
+                graph = load_account_graphs(session, [int(model.id)]).get(int(model.id), {})
+                if (graph.get("overview") or {}).get("sub2api_synced_at"):
+                    return ActionExecutionResult(ok=False, error="账号已导入 Sub2API，本系统已停用，禁止刷新 Token")
 
             platform_cls = get(command.platform)
             instance = platform_cls(config=RegisterConfig())

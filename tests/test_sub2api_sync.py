@@ -476,7 +476,15 @@ def test_import_retry_after_credential_change_reconciles_without_duplicate_post(
     ]
 
 
-def test_pending_import_with_changed_token_and_no_remote_record_blocks_repost():
+def _backdate_import_attempt(account_id: int) -> None:
+    # 把上次发出导入请求的时间挪到宽限期之前；键名写字面量，修复前这个键不存在也不会报 AttributeError。
+    AccountsRepository().update(
+        account_id,
+        AccountUpdateCommand(overview={"sub2api_import_attempted_at": "2000-01-01T00:00:00+00:00"}),
+    )
+
+
+def test_pending_import_waits_within_grace_without_repost_or_permanent_block():
     _configure()
     account_id = _create("no-remote-record@test.com")
     client = FakeClient([(False, "request failed"), (True, "")])
@@ -494,12 +502,60 @@ def test_pending_import_with_changed_token_and_no_remote_record_blocks_repost():
     assert first["failed"] == 1
     assert second["failed"] == 1
     assert second["errors"][0]["stage"] == "import_reconcile"
-    assert overview[s2a.IMPORT_RECONCILE_BLOCKED_KEY]
+    assert "仍在 Sub2API 处理中" in second["errors"][0]["message"]
+    assert not overview.get(s2a.IMPORT_RECONCILE_BLOCKED_KEY)
     assert not overview.get(s2a.ACCOUNT_ID_KEY)
     assert client.pushed == ["no-remote-record@test.com"]
 
 
-def test_changed_pending_payload_is_blocked_before_second_post():
+def test_pending_import_restarts_with_new_marker_after_grace_when_remote_has_nothing():
+    _configure()
+    account_id = _create("restart-after-grace@test.com")
+    client = FakeClient([(False, "HTTP 500: upstream down"), (True, "")])
+    service = _service(client)
+    selection = AccountExportSelection(platform="chatgpt", ids=[account_id])
+
+    first = service.sync_selected(selection)
+    first_marker = AccountsRepository().get(account_id).overview[s2a.IMPORT_MARKER_KEY]
+    AccountsRepository().update(
+        account_id,
+        AccountUpdateCommand(credentials={"access_token": "at_rotated", "refresh_token": "rt_rotated"}),
+    )
+    _backdate_import_attempt(account_id)
+    second = service.sync_selected(selection)
+
+    overview = AccountsRepository().get(account_id).overview
+    assert first["failed"] == 1
+    assert second["created"] == 1 and second["failed"] == 0 and second["postprocess_failed"] == 0
+    assert overview[s2a.ACCOUNT_ID_KEY] == "100"
+    assert client.account_markers[100] != first_marker
+    assert client.account_ids["restart-after-grace@test.com"] == {100}
+    assert client.pushed == ["restart-after-grace@test.com", "restart-after-grace@test.com"]
+    assert not overview.get(s2a.IMPORT_MARKER_KEY)
+
+
+def test_legacy_reconcile_blocked_flag_no_longer_blocks_after_grace():
+    _configure()
+    account_id = _create("legacy-blocked@test.com")
+    client = FakeClient([(False, "request failed"), (True, "")])
+    service = _service(client)
+    selection = AccountExportSelection(platform="chatgpt", ids=[account_id])
+
+    service.sync_selected(selection)
+    AccountsRepository().update(
+        account_id,
+        AccountUpdateCommand(overview={s2a.IMPORT_RECONCILE_BLOCKED_KEY: "2026-09-29T00:00:00+00:00"}),
+    )
+    _backdate_import_attempt(account_id)
+    second = service.sync_selected(selection)
+
+    overview = AccountsRepository().get(account_id).overview
+    assert second["created"] == 1
+    assert overview[s2a.ACCOUNT_ID_KEY] == "100"
+    assert not overview.get(s2a.IMPORT_RECONCILE_BLOCKED_KEY)
+
+
+def test_changed_pending_payload_waits_within_grace_before_second_post():
     _configure()
     account_id = _create("stable-key-retry@test.com")
     client = s2a.Sub2ApiClient("http://s2a.local", "admin-key")
@@ -523,7 +579,8 @@ def test_changed_pending_payload_is_blocked_before_second_post():
     assert post.call_count == 1
     overview = AccountsRepository().get(account_id).overview
     assert overview[s2a.IMPORT_MARKER_KEY]
-    assert overview[s2a.IMPORT_RECONCILE_BLOCKED_KEY]
+    assert not overview.get(s2a.IMPORT_RECONCILE_BLOCKED_KEY)
+    assert "仍在 Sub2API 处理中" in second["errors"][0]["message"]
 
 
 def test_pending_import_with_multiple_new_remote_records_pauses_without_repost():
@@ -704,6 +761,7 @@ def test_manual_sync_failure_is_not_marked_and_retries_next_time():
     service = _service(client)
 
     first = service.sync_selected(AccountExportSelection(platform="chatgpt", ids=[account_id]))
+    _backdate_import_attempt(account_id)
     second = service.sync_selected(AccountExportSelection(platform="chatgpt", ids=[account_id]))
 
     assert first["failed"] == 1 and first["errors"][0]["message"] == "boom"
