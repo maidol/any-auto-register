@@ -24,7 +24,6 @@ import pytest
 
 from api.task_commands import RegisterTaskRequest
 from core.registration.strategy import (
-    ATTEMPT_BUDGET_FACTOR,
     RegistrationStrategy,
     StrategyParamError,
 )
@@ -76,7 +75,7 @@ def test_strategy_values_reach_the_kernel_unchanged():
     strategy = RegistrationStrategy.from_payload(
         RegisterTaskRequest(**FRONTEND_BODY).model_dump()
     )
-    assert strategy.target_success == 3
+    assert strategy.max_cycles == 3
     assert strategy.retry_count == 2
     assert strategy.attempts_per_cycle == 3
     assert strategy.retry_interval_seconds == 15.0
@@ -100,7 +99,7 @@ def test_omitted_strategy_params_fall_back_to_kernel_defaults():
 def test_max_attempts_stays_computed_and_is_never_emitted_as_zero():
     """地雷钉子：max_attempts 不许被声明成带字面默认值的字段。
 
-    内核算的是 target*(retry+1)*ATTEMPT_BUDGET_FACTOR，而 from_payload 里
+    内核默认预算是 count*(retry+1)，而 from_payload 里
     `_int("max_attempts", default_budget, 1, 1000)` 的下界是 1。
     一旦请求模型写成 `max_attempts: int = 0`，model_dump() 就会无条件吐出 0，
     下界检查当场抛 StrategyParamError —— **每一个注册任务都会失败**。
@@ -112,7 +111,7 @@ def test_max_attempts_stays_computed_and_is_never_emitted_as_zero():
         "会让 from_payload 的下界检查对每一个任务都抛 StrategyParamError"
     )
     strategy = RegistrationStrategy.from_payload(dumped)
-    assert strategy.max_attempts == 3 * (2 + 1) * ATTEMPT_BUDGET_FACTOR
+    assert strategy.max_attempts == 3 * (2 + 1)
 
 
 def test_out_of_range_retry_count_is_rejected_not_silently_clamped():

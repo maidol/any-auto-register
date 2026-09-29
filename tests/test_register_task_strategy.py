@@ -135,31 +135,37 @@ def world(monkeypatch, *, outcomes=(), proxies=("P1", "P2", "P3"), default_outco
 
 
 # --------------------------------------------------------------------------
-# B1 —— count 是成功目标，不是尝试数；预算有限
+# B1 —— count 是账号周期上限，失败周期也消耗名额
 # --------------------------------------------------------------------------
 
-def test_count_is_a_success_target_not_an_attempt_count(monkeypatch):
-    """两次失败夹在中间，count=2 仍要拿到 2 个账号。
-
-    今天 count 是尝试数：跑 2 次、两次都失败就收工，saved 为空。
-    """
-    w = world(monkeypatch, outcomes=["boom", "ok", "boom", "ok"])
+def test_count_caps_outer_cycles_even_when_a_cycle_fails(monkeypatch):
+    """两轮上限不因首轮失败而扩张；周期内仍按 retry_count 重试。"""
+    w = world(monkeypatch, outcomes=["boom"] * 3 + ["ok"])
     task = w.run(count=2, retry_count=2)
 
-    assert len(w.saved) == 2
     assert len(w.register_calls) == 4
+    assert len(w.saved) == 1
+    assert task["data"]["successful_cycles"] == 1
+    assert task["data"]["failed_cycles"] == 1
+    assert task["data"]["target_count"] == 2
     assert task["status"] == TASK_STATUS_SUCCEEDED
 
 
-def test_attempt_budget_stops_a_task_that_never_succeeds(monkeypatch):
-    """永远失败时必须在预算处停下，而不是无限转。
-
-    默认预算 = count × (retry_count + 1) × 3 = 2 × 1 × 3 = 6。
-    """
-    w = world(monkeypatch, outcomes=[])
+def test_all_failed_cycles_still_stop_at_count(monkeypatch):
+    w = world(monkeypatch, outcomes=[], default_outcome="boom")
     task = w.run(count=2, retry_count=0)
 
-    assert len(w.register_calls) == 6
+    assert len(w.register_calls) == 2
+    assert task["status"] == TASK_STATUS_FAILED
+    assert task["data"]["stop_reason"] == "completed"
+    assert task["data"]["failed_cycles"] == 2
+
+
+def test_explicit_attempt_budget_can_stop_before_count(monkeypatch):
+    w = world(monkeypatch, outcomes=[], default_outcome="boom")
+    task = w.run(count=2, retry_count=0, max_attempts=1)
+
+    assert len(w.register_calls) == 1
     assert task["status"] == TASK_STATUS_FAILED
     assert task["data"]["stop_reason"] == "attempt_budget_exhausted"
 
@@ -202,9 +208,9 @@ def test_proxy_health_is_reported_once_per_cycle_not_once_per_attempt(monkeypatc
     assert w.pool.reports == [("P1", "ok"), ("P2", "ok")]
 
 
-def test_a_cycle_that_never_succeeds_reports_its_proxy_failed_once(monkeypatch):
+def test_a_failed_cycle_reports_its_proxy_once(monkeypatch):
     w = world(monkeypatch, outcomes=[], proxies=["P1", "P2"])
-    w.run(count=1, retry_count=1, max_attempts=4)
+    w.run(count=2, retry_count=1, max_attempts=4)
 
     assert w.pool.reports == [("P1", "fail"), ("P2", "fail")]
 
@@ -336,15 +342,13 @@ def test_retry_interval_is_applied_between_attempts_of_one_account(monkeypatch):
     assert len(w.register_calls) == 2
 
 
-def test_herosms_keeps_going_for_bonus_accounts_while_the_number_is_alive(monkeypatch):
-    """号码仍可复用时，超过 count 的额外成功要继续拿 —— 这是付费功能，不能在重构里丢掉。"""
-    alive = {"n": 2}
+def test_herosms_phone_reuse_does_not_exceed_count_cycle_limit(monkeypatch):
+    """复用号码也不能在配置的账号周期上限外追加注册。"""
+    alive_checks = []
 
     def _fake_alive(_settings):
-        if alive["n"] > 0:
-            alive["n"] -= 1
-            return True, {"phone_number": "1234567890", "remaining_seconds": 60, "use_count": 1}
-        return False, {}
+        alive_checks.append(True)
+        return True, {"phone_number": "1234567890", "remaining_seconds": 60, "use_count": 1}
 
     monkeypatch.setattr("core.base_sms.is_herosms_phone_cache_alive", _fake_alive)
     w = world(monkeypatch, outcomes=["ok"] * 8)
@@ -355,8 +359,9 @@ def test_herosms_keeps_going_for_bonus_accounts_while_the_number_is_alive(monkey
     monkeypatch.setattr("application.tasks._hero_task_reuse_policy", lambda k, s: (True, 3))
     task = w.run(count=1)
 
-    # 目标 1 个 + 号码活着期间再补 2 个
-    assert len(w.saved) == 3
+    assert len(w.saved) == 1
+    assert len(w.register_calls) == 1
+    assert alive_checks == []
     assert task["status"] == TASK_STATUS_SUCCEEDED
 
 
@@ -368,15 +373,15 @@ def test_result_data_records_the_strategy_and_the_stop_reason(monkeypatch):
     assert data["stop_reason"] == "completed"
     assert data["successful_cycles"] == 2
     assert data["attempts"] == 2
-    assert data["strategy"]["target_success"] == 2
+    assert data["strategy"]["max_cycles"] == 2
     assert data["strategy"]["retry_count"] == 1
 
 
 def test_progress_and_success_count_track_saved_accounts_not_attempts(monkeypatch):
     """今天 progress 走的是 completed（尝试数），所以两次失败也会显示 2/2。"""
-    w = world(monkeypatch, outcomes=["boom", "boom", "ok", "ok"])
+    w = world(monkeypatch, outcomes=["boom", "boom", "boom", "ok"])
     task = w.run(count=2, retry_count=2)
 
-    assert task["success"] == 2
-    assert task["progress_detail"]["current"] == 2
+    assert task["success"] == 1
+    assert task["progress_detail"]["current"] == 1
     assert task["progress_detail"]["total"] == 2

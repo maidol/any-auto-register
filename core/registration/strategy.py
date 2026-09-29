@@ -9,9 +9,8 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
-MAX_TARGET_SUCCESS = 50
+MAX_ACCOUNT_CYCLES = 50
 MAX_RETRY_COUNT = 10
-ATTEMPT_BUDGET_FACTOR = 3
 
 CANCELLED = "cancelled"
 EXHAUSTED_ATTEMPTS = "attempt_budget_exhausted"
@@ -29,7 +28,7 @@ class StrategyParamError(ValueError):
 
 @dataclass(frozen=True)
 class RegistrationStrategy:
-    target_success: int = 1
+    max_cycles: int = 1
     retry_count: int = 0
     retry_interval_seconds: float = 0.0
     account_interval_seconds: float = 0.0
@@ -85,9 +84,9 @@ class RegistrationStrategy:
                 "需要并发请显式选择 legacy 模式"
             )
 
-        target_success = _int("count", 1, 1, MAX_TARGET_SUCCESS)
+        max_cycles = _int("count", 1, 1, MAX_ACCOUNT_CYCLES)
         retry_count = _int("retry_count", 0, 0, MAX_RETRY_COUNT)
-        default_budget = target_success * (retry_count + 1) * ATTEMPT_BUDGET_FACTOR
+        default_budget = max_cycles * (retry_count + 1)
         max_attempts = _int("max_attempts", default_budget, 1, 1000)
         max_failed_cycles = _int("max_failed_cycles", 0, 0, 1000)
 
@@ -96,7 +95,7 @@ class RegistrationStrategy:
             raise StrategyParamError(f"proxy_strategy 只支持 round_robin / fixed，收到 {strategy_name!r}")
 
         return cls(
-            target_success=target_success,
+            max_cycles=max_cycles,
             retry_count=retry_count,
             retry_interval_seconds=_num("retry_interval_seconds", 0.0, 0.0),
             account_interval_seconds=_num("account_interval_seconds", 0.0, 0.0),
@@ -109,7 +108,7 @@ class RegistrationStrategy:
 
     def as_result_dict(self) -> dict[str, Any]:
         return {
-            "target_success": self.target_success,
+            "max_cycles": self.max_cycles,
             "retry_count": self.retry_count,
             "retry_interval_seconds": self.retry_interval_seconds,
             "account_interval_seconds": self.account_interval_seconds,
@@ -248,7 +247,7 @@ class AccountCycleRunner:
         out = TaskOutcome()
         index = 0
 
-        while out.successful_cycles < s.target_success:
+        while len(out.cycles) < s.max_cycles:
             if self._is_cancelled():
                 out.stop_reason = CANCELLED
                 return out
@@ -276,7 +275,7 @@ class AccountCycleRunner:
             if record.interrupted:
                 out.stop_reason = CANCELLED
                 return out
-            if out.successful_cycles >= s.target_success:
+            if len(out.cycles) >= s.max_cycles:
                 break
             if self._is_cancelled():
                 out.stop_reason = CANCELLED

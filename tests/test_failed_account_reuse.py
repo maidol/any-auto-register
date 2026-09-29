@@ -219,7 +219,7 @@ def test_a_task_does_not_retry_the_same_failed_row_in_a_second_cycle(monkeypatch
     _failed("bad@reuse.test", "not_created")
     w = _world(monkeypatch, outcomes=["boom", "ok"])
 
-    w.run(count=1, retry_count=0, max_attempts=2)
+    w.run(count=2, retry_count=0, max_attempts=2)
 
     assert w.emails == ["bad@reuse.test", "box1@example.com"]
     overview = _overview("bad@reuse.test")

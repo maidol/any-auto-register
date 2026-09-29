@@ -383,7 +383,10 @@ export default function Register() {
             <CardContent className="space-y-4">
               <Select label="平台" k="platform" options={platformOptions} />
               <div className="grid gap-4 md:grid-cols-3">
-                <Input label="批量数量" k="count" type="number" />
+                <div>
+                  <Input label="账号周期上限" k="count" type="number" />
+                  <p className="mt-1 text-xs text-[var(--text-muted)]">失败周期也计入上限；每个周期仍可按失败重试次数重试。</p>
+                </div>
                 <Select label="代理来源" k="proxy_mode" options={[["pool", "普通代理池"], ["openvpn", "VPN Gate OpenVPN"]]} />
                 <Input
                   label="代理 (可选)"

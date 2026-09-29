@@ -851,8 +851,6 @@ def _create_openvpn_task_session(logger: TaskLogger | None = None):
 
 
 def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
-    from dataclasses import replace
-
     from core.base_mailbox import MailboxAccount, PinnedMailbox
     from core.proxy_pool import proxy_pool
     from core.registration.errors import (
@@ -863,7 +861,6 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
     )
     from core.registration.strategy import (
         CANCELLED,
-        COMPLETED,
         PROXY_FAIL,
         PROXY_OK,
         AccountCycleRunner,
@@ -897,22 +894,8 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
         logger.finish(TASK_STATUS_FAILED, error=str(exc))
         return
 
-    sms_provider_key, sms_settings = _resolve_sms_provider_for_task(extra)
-    herosms_enabled = sms_provider_key in ("herosms", "herosms_api") and bool(str(sms_settings.get("herosms_api_key") or "").strip())
-    hero_reuse_to_max, hero_extra_max = (
-        _hero_task_reuse_policy(sms_provider_key, sms_settings)
-        if herosms_enabled
-        else (False, 0)
-    )
-    bonus_budget = hero_extra_max if (herosms_enabled and hero_reuse_to_max) else 0
-    progress_total = strategy.target_success + bonus_budget
-
+    progress_total = strategy.max_cycles
     logger.set_progress(0, progress_total)
-    if herosms_enabled and hero_reuse_to_max:
-        logger.log(
-            f"HeroSMS 模式: 成功目标 {strategy.target_success}，"
-            f"号码仍可复用时最多额外成功 {hero_extra_max} 个"
-        )
 
     try:
         get(platform_name)
@@ -966,13 +949,8 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
         logger.finish(TASK_STATUS_FAILED, error=f"邮箱初始化失败: {exc}")
         return
 
-    # 快照要按「可能发生多少个账号周期」算，不是按「目标成功几个」算：
-    # 失败周期也各占一个代理，按目标数算会让连续失败的周期绕回同一个代理，
-    # 正好撞上 ProxyPool.report_fail 里 fail_count >= 5 的自动禁用。
-    snapshot_budget = min(
-        strategy.target_success + bonus_budget + strategy.retry_count + 1,
-        strategy.max_attempts,
-    )
+    # count 限制账号周期数；每个周期只消耗一个代理。
+    snapshot_budget = min(strategy.max_cycles, strategy.max_attempts)
 
     try:
         allocator = TaskProxyAllocator(
@@ -989,7 +967,7 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
     if allocator.snapshot:
         logger.log(f"本次任务代理快照: {len(allocator.snapshot)} 个")
 
-    state = {"saved": 0, "index_offset": 0, "reused": set(), "created_noted": False}
+    state = {"saved": 0, "reused": set(), "created_noted": False}
 
     # —— 账号周期的身份与生命周期边界（需求 1d + 需求 4）——
     # 「轮」在调度内核里是有的，在这一层原本没有：每次尝试都新造一个 platform，
@@ -1102,7 +1080,7 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
     def _register_once(index: int, attempt: int, resolved_proxy: str | None) -> AttemptOutcome:
         if attempt == 0 or (openvpn_session is not None and not cycle["open"]):
             _open_cycle()
-        label = state["index_offset"] + index + 1
+        label = index + 1
         logger.log(
             f"开始注册第 {label} 个账号"
             f"（第 {attempt + 1}/{strategy.attempts_per_cycle} 次尝试）"
@@ -1223,50 +1201,12 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
             on_event=_on_event,
         )
 
-    def _hero_phone_alive() -> bool:
-        if not bonus_budget:
-            return False
-        try:
-            from core.base_sms import is_herosms_phone_cache_alive
-            alive, info = is_herosms_phone_cache_alive(sms_settings)
-            if alive:
-                logger.log(
-                    "HeroSMS 号码仍可复用: "
-                    f"{str(info.get('phone_number') or '')[:5]}**** "
-                    f"剩余 {int(info.get('remaining_seconds') or 0)} 秒，"
-                    f"已成功 {int(info.get('use_count') or 0)} 次"
-                )
-            return bool(alive)
-        except Exception:
-            return False
-
     try:
         outcome = _make_runner(strategy).run()
         errors = list(outcome.errors)
         attempts = outcome.attempts
         successes = outcome.successful_cycles
         stop_reason = outcome.stop_reason
-
-        # HeroSMS 号码复用：目标达成之后，只要号码还活着就继续补成功账号。
-        bonus_done = 0
-        one_more = replace(strategy, target_success=1, max_failed_cycles=1)
-        while (
-            stop_reason == COMPLETED
-            and bonus_done < bonus_budget
-            and not logger.is_cancel_requested()
-            and _hero_phone_alive()
-        ):
-            state["index_offset"] = successes + outcome.failed_cycles + bonus_done
-            bonus = _make_runner(replace(one_more, max_attempts=strategy.attempts_per_cycle)).run()
-            attempts += bonus.attempts
-            successes += bonus.successful_cycles
-            errors.extend(bonus.errors)
-            bonus_done += 1
-            if bonus.stop_reason == CANCELLED:
-                stop_reason = CANCELLED
-                break
-            if not bonus.successful_cycles:
-                break
     except Exception as exc:
         logger.log(f"致命错误: {exc}", level="error")
         logger.finish(TASK_STATUS_FAILED, error=str(exc))
@@ -1287,9 +1227,9 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
         "attempts": attempts,
         "successful_cycles": successes,
         "failed_cycles": outcome.failed_cycles,
-        "target_count": strategy.target_success,
-        "extra_success": max(0, successes - strategy.target_success),
-        "hero_sms_reuse": bool(bonus_budget),
+        "target_count": strategy.max_cycles,
+        "extra_success": 0,
+        "hero_sms_reuse": False,
         "strategy": strategy.as_result_dict(),
     })
     logger.log(

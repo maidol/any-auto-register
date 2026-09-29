@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 
 import { API_BASE, apiFetch } from '@/lib/utils'
 import { getTaskStatusText, isTerminalTaskStatus } from '@/lib/tasks'
+import { copyTextToClipboard } from '@/lib/clipboard'
 
 export function TaskLogPanel({
   taskId,
@@ -13,6 +14,7 @@ export function TaskLogPanel({
   const [lines, setLines] = useState<string[]>([])
   const [task, setTask] = useState<any | null>(null)
   const [doneStatus, setDoneStatus] = useState<string | null>(null)
+  const [copyFeedback, setCopyFeedback] = useState<{ ok: boolean; text: string } | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const seenEventIdsRef = useRef<Set<number>>(new Set())
   const cursorRef = useRef(0)
@@ -34,6 +36,7 @@ export function TaskLogPanel({
     setLines([])
     setTask(null)
     setDoneStatus(null)
+    setCopyFeedback(null)
 
     const pushEvent = (payload: any) => {
       const eventId = Number(payload?.id || 0)
@@ -137,8 +140,13 @@ export function TaskLogPanel({
     currentStatus === 'cancelled' || currentStatus === 'interrupted' ? 'border-amber-400/40 bg-amber-400/10 text-amber-200' :
     'border-sky-400/40 bg-sky-400/10 text-sky-200'
 
-  const copyLogs = () => {
-    navigator.clipboard?.writeText(lines.join('\n')).catch(() => {})
+  const copyLogs = async () => {
+    const copied = await copyTextToClipboard(lines.join('\n'))
+    setCopyFeedback(
+      copied
+        ? { ok: true, text: '日志已复制' }
+        : { ok: false, text: '复制失败，请检查浏览器权限或手动选择日志' },
+    )
   }
 
   return (
@@ -181,13 +189,24 @@ export function TaskLogPanel({
           <div className="text-[11px] uppercase tracking-[0.18em] text-[var(--text-muted)]">Live Log</div>
           <div className="mt-1 text-sm font-medium text-[var(--text-primary)]">实时执行日志</div>
         </div>
-        <button
-          type="button"
-          onClick={copyLogs}
-          className="rounded-full border border-[var(--border)] bg-[var(--bg-hover)] px-3 py-1.5 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-        >
-          复制日志
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={copyLogs}
+            className="rounded-full border border-[var(--border)] bg-[var(--bg-hover)] px-3 py-1.5 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+          >
+            复制日志
+          </button>
+          {copyFeedback ? (
+            <span
+              role="status"
+              aria-live="polite"
+              className={`text-xs ${copyFeedback.ok ? 'text-emerald-400' : 'text-red-400'}`}
+            >
+              {copyFeedback.text}
+            </span>
+          ) : null}
+        </div>
       </div>
 
       <div className="min-h-[260px] flex-1 overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--bg-input)] p-4 font-mono text-xs ">

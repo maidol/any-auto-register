@@ -110,8 +110,8 @@ def test_concurrency_greater_than_one_is_rejected():
 
 
 def test_concurrency_one_and_missing_are_both_accepted():
-    assert RegistrationStrategy.from_payload({"count": 2}).target_success == 2
-    assert RegistrationStrategy.from_payload({"count": 2, "concurrency": 1}).target_success == 2
+    assert RegistrationStrategy.from_payload({"count": 2}).max_cycles == 2
+    assert RegistrationStrategy.from_payload({"count": 2, "concurrency": 1}).max_cycles == 2
 
 
 def test_out_of_range_params_are_rejected():
@@ -140,29 +140,43 @@ def test_intervals_above_one_hour_are_accepted():
     assert strategy.account_interval_seconds == 999999.0
 
 
-def test_attempt_budget_defaults_to_three_times_the_nominal_work():
+def test_attempt_budget_defaults_to_all_attempts_within_the_cycle_limit():
     s = RegistrationStrategy.from_payload({"count": 3, "retry_count": 2})
-    assert s.max_attempts == 3 * 3 * 3
+    assert s.max_attempts == 3 * 3
+    assert s.max_cycles == 3
 
 
-# --- 2. 成功目标 ---------------------------------------------------------
+# --- 2. 周期上限 ---------------------------------------------------------
 
-def test_runs_until_target_success_not_until_target_attempts():
+def test_count_caps_outer_cycles_even_when_some_cycles_fail():
     world = FakeWorld([fail(), fail(), OK, OK, fail(), OK])
     s = RegistrationStrategy.from_payload({"count": 3, "retry_count": 0})
     out = build(s, world).run()
-    assert out.successful_cycles == 3
-    assert out.failed_cycles == 3
+    assert len(out.cycles) == 3
+    assert out.successful_cycles == 1
+    assert out.failed_cycles == 2
+    assert out.attempts == 3
+    assert out.stop_reason == COMPLETED
+
+
+def test_retry_attempts_remain_inside_each_cycle_limit():
+    world = FakeWorld([fail(), fail(), OK, fail(), fail(), fail(), OK])
+    s = RegistrationStrategy.from_payload({"count": 2, "retry_count": 2})
+    out = build(s, world).run()
+    assert [cycle.attempts for cycle in out.cycles] == [3, 3]
+    assert out.successful_cycles == 1
+    assert out.failed_cycles == 1
     assert out.attempts == 6
     assert out.stop_reason == COMPLETED
 
 
-def test_attempt_budget_stops_an_otherwise_unbounded_task():
+def test_attempt_budget_can_stop_before_the_cycle_limit():
     world = FakeWorld([fail()] * 100)
-    s = RegistrationStrategy.from_payload({"count": 3, "retry_count": 0, "max_attempts": 7})
+    s = RegistrationStrategy.from_payload({"count": 3, "retry_count": 0, "max_attempts": 2})
     out = build(s, world).run()
     assert out.stop_reason == EXHAUSTED_ATTEMPTS
-    assert out.attempts == 7
+    assert len(out.cycles) == 2
+    assert out.attempts == 2
     assert out.successful_cycles == 0
 
 
@@ -214,7 +228,7 @@ def test_raised_exception_counts_as_a_failed_attempt_not_a_crash():
 def test_account_interval_applies_after_success_and_after_final_failure():
     world = FakeWorld([OK, fail(), OK])
     s = RegistrationStrategy.from_payload(
-        {"count": 2, "retry_count": 0, "account_interval_seconds": 10}
+        {"count": 3, "retry_count": 0, "account_interval_seconds": 10}
     )
     build(s, world).run()
     assert world.sleeps == [10, 10]
@@ -233,7 +247,7 @@ def test_no_account_interval_after_the_final_success():
 
 def test_all_attempts_of_one_account_share_one_proxy_and_next_account_advances():
     world = FakeWorld([fail(), fail(), fail(), OK])
-    s = RegistrationStrategy.from_payload({"count": 1, "retry_count": 2})
+    s = RegistrationStrategy.from_payload({"count": 2, "retry_count": 2})
     build(s, world, proxies=("P1", "P2", "P3")).run()
     assert [c[2] for c in world.calls] == ["P1", "P1", "P1", "P2"]
 
@@ -258,7 +272,7 @@ def test_fixed_proxy_overrides_the_snapshot_for_every_account():
 
 def test_proxy_is_reported_once_per_cycle_not_once_per_attempt():
     world = FakeWorld([fail(), fail(), fail(), OK])
-    s = RegistrationStrategy.from_payload({"count": 1, "retry_count": 2})
+    s = RegistrationStrategy.from_payload({"count": 2, "retry_count": 2})
     build(s, world, proxies=("P1", "P2")).run()
     assert world.proxy_reports == [("P1", PROXY_FAIL), ("P2", PROXY_OK)]
 

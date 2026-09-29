@@ -464,10 +464,11 @@ function RegisterModal({
 
                 <div className="grid grid-cols-2 gap-3">
                   <div>
-                    <label className="text-xs text-[var(--text-muted)] block mb-1">注册数量</label>
+                    <label className="text-xs text-[var(--text-muted)] block mb-1">账号周期上限</label>
                     <input type="number" min={1} max={99} value={regCount}
                       onChange={e => setRegCount(Number(e.target.value))}
                       className="control-surface control-surface-compact text-center" />
+                    <p className="mt-1 text-[11px] text-[var(--text-muted)]">失败周期也计入；每个周期仍可重试。</p>
                   </div>
                   <div>
                     <label className="text-xs text-[var(--text-muted)] block mb-1">并发数</label>
