@@ -605,6 +605,18 @@ def _run_single_account_check(account_id: int, logger: TaskLogger | None = None)
         model = session.get(AccountModel, account_id)
         if not model:
             raise ValueError("账号不存在")
+        graph = load_account_graphs(session, [account_id]).get(account_id, {})
+        if (graph.get("overview") or {}).get("sub2api_synced_at"):
+            result = {
+                "account_id": account_id,
+                "valid": False,
+                "platform": model.platform,
+                "email": model.email,
+                "skipped": True,
+            }
+            if logger:
+                logger.log(f"{model.email}: 已导入 Sub2API，跳过本地检查")
+            return False, result
         plugin = get(model.platform)(config=RegisterConfig())
         account = build_platform_account(session, model)
 
@@ -1291,12 +1303,28 @@ def _execute_account_check_all_task(payload: dict[str, Any], logger: TaskLogger)
     platform = str(payload.get("platform", "") or "")
     limit = max(int(payload.get("limit", 50) or 50), 1)
 
-    with Session(engine) as session:
-        q = select(AccountModel)
-        if platform:
-            q = q.where(AccountModel.platform == platform)
-        q = q.order_by(AccountModel.created_at.desc(), AccountModel.id.desc())
-        accounts = session.exec(q.limit(limit)).all()
+    accounts = []
+    offset = 0
+    while len(accounts) < limit:
+        with Session(engine) as session:
+            q = select(AccountModel)
+            if platform:
+                q = q.where(AccountModel.platform == platform)
+            q = q.order_by(AccountModel.created_at.desc(), AccountModel.id.desc())
+            page = session.exec(q.offset(offset).limit(limit)).all()
+            graphs = load_account_graphs(session, [int(item.id) for item in page if item.id])
+        if not page:
+            break
+        for item in page:
+            graph = graphs.get(int(item.id or 0), {})
+            if (graph.get("overview") or {}).get("sub2api_synced_at"):
+                continue
+            accounts.append(item)
+            if len(accounts) >= limit:
+                break
+        offset += len(page)
+        if len(page) < limit:
+            break
 
     total = len(accounts)
     logger.set_progress(0, total)

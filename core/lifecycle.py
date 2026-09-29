@@ -30,6 +30,41 @@ def _utcnow_ts() -> int:
     return int(_utcnow().timestamp())
 
 
+def _is_sub2api_imported(graph: dict[str, Any]) -> bool:
+    overview = graph.get("overview") or {}
+    return bool(overview.get("sub2api_synced_at"))
+
+
+def _load_active_accounts(platform: str, limit: int) -> tuple[list[tuple[AccountModel, dict[str, Any]]], int]:
+    active_statuses = {"registered", "trial", "subscribed"}
+    page_size = max(int(limit), 1)
+    offset = 0
+    skipped = 0
+    targets: list[tuple[AccountModel, dict[str, Any]]] = []
+    while len(targets) < page_size:
+        with Session(engine) as session:
+            q = select(AccountModel)
+            if platform:
+                q = q.where(AccountModel.platform == platform)
+            q = q.order_by(AccountModel.created_at.desc(), AccountModel.id.desc())
+            models = session.exec(q.offset(offset).limit(page_size)).all()
+            graphs = load_account_graphs(session, [int(a.id) for a in models if a.id])
+        if not models:
+            break
+        for model in models:
+            graph = graphs.get(int(model.id or 0), {})
+            if graph.get("lifecycle_status") in active_statuses and not _is_sub2api_imported(graph):
+                targets.append((model, graph))
+                if len(targets) >= page_size:
+                    break
+            else:
+                skipped += 1
+        offset += len(models)
+        if len(models) < page_size:
+            break
+    return targets, skipped
+
+
 # ---------------------------------------------------------------------------
 # Account validity check
 # ---------------------------------------------------------------------------
@@ -43,23 +78,9 @@ def check_accounts_validity(
     """Check validity of active accounts. Returns {valid, invalid, error, skipped}."""
     log = log_fn or logger.info
 
-    with Session(engine) as session:
-        q = select(AccountModel)
-        if platform:
-            q = q.where(AccountModel.platform == platform)
-        q = q.order_by(AccountModel.created_at.desc(), AccountModel.id.desc())
-        accounts = session.exec(q.limit(limit)).all()
-        graphs = load_account_graphs(session, [int(a.id) for a in accounts if a.id])
-
-    # Only check accounts that are in an active lifecycle state
-    active_statuses = {"registered", "trial", "subscribed"}
-    targets = [
-        a for a in accounts
-        if graphs.get(int(a.id or 0), {}).get("lifecycle_status") in active_statuses
-    ]
-
-    results = {"valid": 0, "invalid": 0, "error": 0, "skipped": len(accounts) - len(targets)}
-    for acc in targets:
+    targets, skipped = _load_active_accounts(platform, limit)
+    results = {"valid": 0, "invalid": 0, "error": 0, "skipped": skipped}
+    for acc, _graph in targets:
         try:
             platform_cls = get(acc.platform)
             plugin = platform_cls(config=RegisterConfig())
@@ -112,19 +133,8 @@ def refresh_expiring_tokens(
     log = log_fn or logger.info
     results = {"refreshed": 0, "failed": 0, "skipped": 0}
 
-    with Session(engine) as session:
-        q = select(AccountModel)
-        if platform:
-            q = q.where(AccountModel.platform == platform)
-        accounts = session.exec(q.limit(limit)).all()
-        graphs = load_account_graphs(session, [int(a.id) for a in accounts if a.id])
-
-    active_statuses = {"registered", "trial", "subscribed"}
-    for acc in accounts:
-        graph = graphs.get(int(acc.id or 0), {})
-        if graph.get("lifecycle_status") not in active_statuses:
-            results["skipped"] += 1
-            continue
+    accounts, results["skipped"] = _load_active_accounts(platform, limit)
+    for acc, graph in accounts:
 
         # Currently only ChatGPT has token refresh support
         if acc.platform != "chatgpt":
@@ -305,20 +315,9 @@ def refresh_and_sync_cpa(
     except Exception:
         cpa_api_url, cpa_api_key = "", ""
 
-    # 获取所有活跃 chatgpt 账号
-    with Session(engine) as session:
-        q = select(AccountModel).where(AccountModel.platform == platform)
-        q = q.order_by(AccountModel.created_at.desc()).limit(limit)
-        accounts = session.exec(q).all()
-        graphs = load_account_graphs(session, [int(a.id) for a in accounts if a.id])
-
-    active_statuses = {"registered", "trial", "subscribed"}
-
-    for acc in accounts:
-        graph = graphs.get(int(acc.id or 0), {})
-        if graph.get("lifecycle_status") not in active_statuses:
-            results["skipped"] += 1
-            continue
+    # 获取到达处理上限前所有待刷新的 ChatGPT 账号，已导入 Sub2API 的会跳过且不占上限。
+    accounts, results["skipped"] = _load_active_accounts(platform, limit)
+    for acc, graph in accounts:
 
         credentials = {
             c["key"]: c["value"]
