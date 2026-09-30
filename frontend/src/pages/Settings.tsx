@@ -308,6 +308,11 @@ const TABS: { id: string; label: string; icon: any; sections?: any[] }[] = [
           options: [{ value: '0', label: '关闭' }, { value: '1', label: '开启' }],
         },
         { key: 'sub2api_sync_interval_minutes', label: '同步间隔（分钟）', placeholder: '10' },
+        {
+          key: 'sub2api_delete_after_import',
+          label: '导入完成后删除本系统账号',
+          options: [{ value: '1', label: '开启' }, { value: '0', label: '关闭' }],
+        },
       ],
     }],
   },

@@ -32,6 +32,7 @@ def _configure(**extra: str) -> None:
         "sub2api_url": "http://s2a.local/",
         "sub2api_admin_key": "admin-key",
         "sub2api_default_group_id": "12",
+        "sub2api_delete_after_import": "0",
         **extra,
     })
 
@@ -352,6 +353,57 @@ def test_manual_import_binds_group_before_refresh_and_model_sync():
     assert overview["sub2api_group_id"] == "12"
     assert overview["sub2api_group_bound_at"]
     assert result["group_bind_failed"] == 0
+
+
+def test_delete_after_import_removes_local_account_once_postprocess_completes():
+    _configure(sub2api_delete_after_import="1")
+    account_id = _create("gone@test.com")
+    client = FakeClient()
+
+    result = _service(client).sync_selected(AccountExportSelection(platform="chatgpt", ids=[account_id]))
+
+    assert AccountsRepository().get(account_id) is None
+    assert result["created"] == 1
+    assert result["deleted"] == 1
+
+
+def test_delete_after_import_is_on_when_setting_was_never_saved():
+    _configure()
+    config_store.set("sub2api_delete_after_import", "")
+    account_id = _create("default-on@test.com")
+
+    result = _service(FakeClient()).sync_selected(AccountExportSelection(platform="chatgpt", ids=[account_id]))
+
+    assert AccountsRepository().get(account_id) is None
+    assert result["deleted"] == 1
+
+
+def test_delete_after_import_off_keeps_local_account():
+    _configure(sub2api_delete_after_import="0")
+    account_id = _create("keep@test.com")
+
+    result = _service(FakeClient()).sync_selected(AccountExportSelection(platform="chatgpt", ids=[account_id]))
+
+    assert AccountsRepository().get(account_id) is not None
+    assert result["deleted"] == 0
+
+
+def test_delete_after_import_keeps_account_while_postprocess_is_incomplete_then_deletes_on_retry():
+    _configure(sub2api_delete_after_import="1")
+    account_id = _create("retry-del@test.com")
+    client = FakeClient()
+    client.model_sync_failures = 1
+    service = _service(client)
+    selection = AccountExportSelection(platform="chatgpt", ids=[account_id])
+
+    first = service.sync_selected(selection)
+    assert first["model_sync_failed"] == 1 and first["deleted"] == 0
+    assert AccountsRepository().get(account_id) is not None
+
+    second = service.sync_selected(selection)
+    assert second["deleted"] == 1
+    assert AccountsRepository().get(account_id) is None
+    assert client.pushed == ["retry-del@test.com"]
 
 
 def test_group_binding_failure_retries_without_reimport_or_repeating_completed_stages():

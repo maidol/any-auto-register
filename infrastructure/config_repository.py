@@ -13,6 +13,7 @@ class ConfigRepository:
         "team_manager_url", "team_manager_key",
         "any2api_url", "any2api_password",
         "sub2api_url", "sub2api_admin_key", "sub2api_default_group_id", "sub2api_auto_sync", "sub2api_sync_interval_minutes",
+        "sub2api_delete_after_import",
     }
 
     def __init__(self, definitions: ProviderDefinitionsRepository | None = None):
