@@ -378,6 +378,7 @@ class Sub2ApiSyncService:
             "refresh_failed": 0,
             "model_sync_failed": 0,
             "postprocess_failed": 0,
+            "deleted": 0,
             "aborted": False,
             "errors": [],
         }
@@ -428,6 +429,14 @@ class Sub2ApiSyncService:
             completed_at = _utcnow().isoformat()
             self.repository.update(item.id, AccountUpdateCommand(overview={done_key: completed_at}))
             overview[done_key] = completed_at
+        if all(overview.get(done_key) for _, done_key, _, _ in stages) and self._delete_after_import_enabled():
+            if self.repository.delete(item.id):
+                summary["deleted"] += 1
+
+    @staticmethod
+    def _delete_after_import_enabled() -> bool:
+        # 未保存过该配置视为开启；只有显式设为 "0" 才保留本地账号。
+        return str(config_store.get("sub2api_delete_after_import", "") or "").strip() != "0"
 
     @staticmethod
     def _stored_import_ids(overview: dict) -> set[int] | None:
