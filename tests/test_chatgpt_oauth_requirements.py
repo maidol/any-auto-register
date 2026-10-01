@@ -22,13 +22,23 @@ def test_assert_complete_oauth_callback_accepts_complete_payload():
     })
 
 
+def test_assert_complete_oauth_callback_accepts_nextauth_payload():
+    # NextAuth 流程只返回 account_id + access_token，必须放行
+    _assert_complete_oauth_callback({
+        "account_id": "acct_123",
+        "access_token": "at_123",
+        "refresh_token": "",
+        "id_token": "",
+    })
+
+
 def test_assert_complete_oauth_callback_rejects_partial_payload():
-    with pytest.raises(RuntimeError, match="完整 OAuth callback"):
+    with pytest.raises(RuntimeError, match="完整 OAuth callback.*access_token"):
         _assert_complete_oauth_callback({
             "account_id": "acct_123",
-            "access_token": "at_123",
-            "refresh_token": "",
-            "id_token": "",
+            "access_token": "",
+            "refresh_token": "rt_123",
+            "id_token": "id_123",
         })
 
 
@@ -57,14 +67,14 @@ def test_protocol_mailbox_mapper_rejects_partial_oauth_result():
         email="user@example.com",
         password="Secret123!",
         account_id="acct_123",
-        access_token="at_123",
-        refresh_token="",
-        id_token="",
+        access_token="",
+        refresh_token="rt_123",
+        id_token="id_123",
         session_token="sess_123",
         workspace_id="",
     )
 
-    with pytest.raises(RuntimeError, match="完整 OAuth callback"):
+    with pytest.raises(RuntimeError, match="完整 OAuth callback.*access_token"):
         adapter.result_mapper(ctx, result)
 
 

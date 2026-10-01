@@ -24,6 +24,21 @@ DEFAULT_VPN_GATE_SOURCE = "https://www.vpngate.net/api/iphone/"
 DEFAULT_HEALTH_URL = "https://www.gstatic.com/generate_204"
 
 
+def positive_env_number(name: str, default: int | float, cast: Callable[[str], int | float]) -> int | float:
+    """读一个必须为正数的环境变量；写坏了只打警告并回落默认值，不让应用起不来。"""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = cast(raw)
+    except (TypeError, ValueError):
+        value = None
+    if value is None or value <= 0:
+        print(f"[OpenVPN] 环境变量 {name}={raw!r} 无效，改用默认值 {default}")
+        return default
+    return value
+
+
 class RefreshBusyError(RuntimeError):
     """Raised when a refresh is already running in this process."""
 
@@ -48,20 +63,22 @@ class OpenVPNRefreshService:
         self.manager_factory = manager_factory
         self.snapshot_fetcher = snapshot_fetcher
         self._uses_default_snapshot_fetcher = snapshot_fetcher is fetch_snapshot
-        raw_max_snapshot = max_snapshot_bytes or os.getenv("VPN_GATE_MAX_SNAPSHOT_BYTES", "12582912")
-        try:
-            self.max_snapshot_bytes = int(raw_max_snapshot)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("VPN_GATE_MAX_SNAPSHOT_BYTES must be an integer") from exc
-        if self.max_snapshot_bytes <= 0:
-            raise ValueError("VPN_GATE_MAX_SNAPSHOT_BYTES must be positive")
+        if max_snapshot_bytes:
+            try:
+                self.max_snapshot_bytes = int(max_snapshot_bytes)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("VPN_GATE_MAX_SNAPSHOT_BYTES must be an integer") from exc
+            if self.max_snapshot_bytes <= 0:
+                raise ValueError("VPN_GATE_MAX_SNAPSHOT_BYTES must be positive")
+        else:
+            self.max_snapshot_bytes = positive_env_number("VPN_GATE_MAX_SNAPSHOT_BYTES", 12582912, int)
         self.snapshot_parser = snapshot_parser
         self.proxy_builder = proxy_builder
         self.source = source or os.getenv("VPN_GATE_SOURCE", DEFAULT_VPN_GATE_SOURCE)
         self.health_url = health_url or os.getenv("VPN_GATE_HEALTHCHECK_URL", DEFAULT_HEALTH_URL)
-        self.fetch_timeout = int(fetch_timeout or os.getenv("VPN_GATE_FETCH_TIMEOUT", "30"))
+        self.fetch_timeout = int(fetch_timeout or positive_env_number("VPN_GATE_FETCH_TIMEOUT", 30, int))
         self.health_timeout = float(
-            health_timeout or os.getenv("VPN_GATE_HEALTHCHECK_TIMEOUT", "20")
+            health_timeout or positive_env_number("VPN_GATE_HEALTHCHECK_TIMEOUT", 20.0, float)
         )
         self._direct_probe = direct_probe or self._probe_direct
         self._lock = threading.Lock()
