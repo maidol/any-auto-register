@@ -7,7 +7,7 @@ import threading
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from application.openvpn_refresh import OpenVPNRefreshService, openvpn_refresh_service
+from application.openvpn_refresh import OpenVPNRefreshService, openvpn_refresh_service, positive_env_number
 from infrastructure.openvpn_proxies_repository import OpenVPNProxiesRepository
 
 
@@ -54,7 +54,7 @@ class OpenVPNRefreshScheduler:
         )
         raw_attempts = max_attempts
         if raw_attempts is None:
-            raw_attempts = os.getenv("VPN_GATE_REFRESH_RETRIES", str(DEFAULT_MAX_ATTEMPTS))
+            raw_attempts = positive_env_number("VPN_GATE_REFRESH_RETRIES", DEFAULT_MAX_ATTEMPTS, int)
         try:
             raw_attempts = int(raw_attempts)
         except (TypeError, ValueError) as exc:

@@ -352,11 +352,6 @@ def test_herosms_phone_reuse_does_not_exceed_count_cycle_limit(monkeypatch):
 
     monkeypatch.setattr("core.base_sms.is_herosms_phone_cache_alive", _fake_alive)
     w = world(monkeypatch, outcomes=["ok"] * 8)
-    monkeypatch.setattr(
-        "application.tasks._resolve_sms_provider_for_task",
-        lambda extra: ("herosms", {"herosms_api_key": "k"}),
-    )
-    monkeypatch.setattr("application.tasks._hero_task_reuse_policy", lambda k, s: (True, 3))
     task = w.run(count=1)
 
     assert len(w.saved) == 1

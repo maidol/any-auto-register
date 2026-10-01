@@ -675,25 +675,6 @@ def execute_task(task_id: str) -> None:
     handler(payload, logger)
 
 
-def _resolve_sms_provider_for_task(extra: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    from infrastructure.provider_definitions_repository import ProviderDefinitionsRepository
-    from infrastructure.provider_settings_repository import ProviderSettingsRepository
-
-    settings_repo = ProviderSettingsRepository()
-    definitions_repo = ProviderDefinitionsRepository()
-    provider_key = str(
-        extra.get("sms_provider")
-        or extra.get("phone_provider")
-        or settings_repo.get_default_provider_key("sms")
-        or ""
-    ).strip()
-    if not provider_key:
-        provider_key = "sms_activate" if extra.get("sms_activate_api_key") else ""
-    definition = definitions_repo.get_by_key("sms", provider_key) if provider_key else None
-    settings = settings_repo.resolve_runtime_settings("sms", provider_key, extra) if definition else dict(extra)
-    return provider_key, settings
-
-
 def _bool_config(value: Any, default: bool) -> bool:
     if value in (None, ""):
         return default
@@ -707,15 +688,6 @@ def _int_config(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
-
-
-def _hero_task_reuse_policy(provider_key: str, settings: dict[str, Any]) -> tuple[bool, int]:
-    extra_max = max(_int_config(settings.get("register_phone_extra_max"), 3), 0)
-    is_herosms = provider_key in {"herosms", "herosms_api"}
-    is_openai_dr = str(settings.get("sms_service") or "dr").strip().lower() == "dr"
-    if is_herosms and is_openai_dr:
-        return False, extra_max
-    return _bool_config(settings.get("register_reuse_phone_to_max"), True), extra_max
 
 
 def _auto_followup_windsurf_payment(
