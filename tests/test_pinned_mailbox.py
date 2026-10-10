@@ -196,3 +196,71 @@ def test_tempmail_web_close_is_idempotent():
 
     assert browser.exits == 1
     assert executor.shutdown_calls == 1
+
+
+def test_fallback_ensure_address_uses_only_selected_provider():
+    class AddressMailbox(_CountingMailbox):
+        def __init__(self, email):
+            super().__init__()
+            self.email = email
+            self.ensure_calls = []
+
+        def ensure_address(self, email):
+            self.ensure_calls.append(email)
+            return MailboxAccount(email=self.email, extra={"provider_resource": {"resource_type": "mailbox"}})
+
+    primary = AddressMailbox("one@example.com")
+    other = AddressMailbox("two@example.com")
+    fallback = FallbackMailbox([("selected", primary), ("other", other)])
+
+    account = fallback.ensure_address("one@example.com", provider_key="selected")
+
+    assert account.email == "one@example.com"
+    assert account.extra["mailbox_provider_key"] == "selected"
+    assert primary.ensure_calls == ["one@example.com"]
+    assert other.ensure_calls == []
+
+
+def test_fallback_ensure_address_rejects_unknown_provider():
+    fallback = FallbackMailbox([("selected", _CountingMailbox())])
+
+    with pytest.raises(RuntimeError, match="provider"):
+        fallback.ensure_address("a@example.com", provider_key="missing")
+
+
+def test_base_mailbox_address_ensure_is_optional_but_fails_closed():
+    class BareMailbox(_CountingMailbox):
+        pass
+
+    with pytest.raises(NotImplementedError):
+        BareMailbox().ensure_address("a@example.com")
+
+
+def test_fallback_ensure_address_does_not_fall_through_when_selected_provider_fails():
+    class FailingMailbox(_CountingMailbox):
+        def __init__(self):
+            super().__init__()
+            self.ensure_calls = []
+
+        def ensure_address(self, email):
+            self.ensure_calls.append(email)
+            raise RuntimeError("selected provider unavailable")
+
+    class OtherMailbox(_CountingMailbox):
+        def __init__(self):
+            super().__init__()
+            self.ensure_calls = []
+
+        def ensure_address(self, email):
+            self.ensure_calls.append(email)
+            return MailboxAccount(email=email)
+
+    other = OtherMailbox()
+    selected = FailingMailbox()
+    fallback = FallbackMailbox([("other", other), ("selected", selected)])
+
+    with pytest.raises(RuntimeError, match="selected provider unavailable"):
+        fallback.ensure_address("a@example.com", provider_key="selected")
+
+    assert selected.ensure_calls == ["a@example.com"]
+    assert other.ensure_calls == []

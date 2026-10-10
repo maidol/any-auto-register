@@ -484,6 +484,68 @@ def mark_failed_account_reused(platform: str, email: str) -> None:
     ))
 
 
+def list_reusable_manual_invalid_accounts(platform: str) -> list[dict]:
+    """列出明确手动添加、有效性无效且仍可复用的邮箱账号。"""
+    from core.account_graph import load_account_graphs
+    from core.base_platform import AccountStatus
+
+    with Session(engine) as session:
+        models = session.exec(
+            select(AccountModel)
+            .join(AccountOverviewModel, AccountOverviewModel.account_id == AccountModel.id)
+            .where(AccountModel.platform == platform)
+            .where(AccountOverviewModel.validity_status == "invalid")
+            .where(AccountOverviewModel.lifecycle_status != AccountStatus.FAILED.value)
+            .order_by(AccountModel.id)
+        ).all()
+        graphs = load_account_graphs(session, [int(model.id) for model in models])
+
+    rows = []
+    for model in models:
+        graph = graphs.get(int(model.id), {})
+        overview = graph.get("overview") or {}
+        if overview.get("account_origin") != "manual" or not model.password:
+            continue
+        if int(overview.get("manual_reuse_attempts") or 0) >= FAILED_ACCOUNT_REUSE_MAX:
+            continue
+        rows.append({"email": model.email, "password": model.password})
+    return rows
+
+
+def mark_manual_invalid_account_reused(platform: str, email: str) -> bool:
+    """增加手动无效账号复用次数，不改变生命周期、有效性或来源。"""
+    from core.account_graph import load_account_graphs, patch_account_graph
+    from core.base_platform import AccountStatus
+
+    with Session(engine) as session:
+        model = session.exec(
+            select(AccountModel)
+            .where(AccountModel.platform == platform)
+            .where(AccountModel.email == email)
+        ).first()
+        if model is None:
+            return False
+        graph = load_account_graphs(session, [int(model.id)]).get(int(model.id), {})
+        overview = graph.get("overview") or {}
+        if (
+            graph.get("lifecycle_status") == AccountStatus.FAILED.value
+            or graph.get("validity_status") != "invalid"
+            or overview.get("account_origin") != "manual"
+            or not model.password
+        ):
+            return False
+        attempts = int(overview.get("manual_reuse_attempts") or 0)
+        if attempts >= FAILED_ACCOUNT_REUSE_MAX:
+            return False
+        patch_account_graph(
+            session,
+            model,
+            summary_updates={"manual_reuse_attempts": attempts + 1},
+        )
+        session.commit()
+        return True
+
+
 LEGACY_ACCOUNT_COLUMNS = (
     "region",
     "token",

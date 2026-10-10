@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import pytest
 from sqlmodel import Session, select
 
 import application.tasks as tasks_module
@@ -121,6 +122,125 @@ def test_cfworker_reads_only_addresses_on_its_own_domain():
     assert mailbox.can_read_address("abc@other.com") is False
     assert mailbox.can_read_address("abc@evil-example.test") is False
     assert CFWorkerMailbox(api_url="http://worker.invalid").can_read_address("abc@example.test") is False
+
+
+def test_cfworker_ensure_address_returns_exact_existing_address(monkeypatch):
+    class Response:
+        status_code = 200
+
+        def json(self):
+            return {"results": [{"name": "ABC@EXAMPLE.TEST"}], "count": 1}
+
+    calls = []
+    monkeypatch.setattr("requests.get", lambda *a, **kw: (calls.append((a, kw)) or Response()))
+    monkeypatch.setattr("requests.post", lambda *a, **kw: pytest.fail("existing address must not be created"))
+    mailbox = CFWorkerMailbox(api_url="http://worker.invalid", admin_token="<hidden>", domain="example.test")
+
+    account = mailbox.ensure_address(" ABC@EXAMPLE.TEST ")
+
+    assert account.email == "abc@example.test"
+    assert account.account_id == ""
+    assert calls[0][1]["params"] == {"query": "abc@example.test", "limit": 100, "offset": 0}
+    assert calls[0][1]["headers"]["x-admin-auth"] == "<hidden>"
+
+
+def test_cfworker_ensure_address_ignores_substring_match_and_creates_exact_address(monkeypatch):
+    class Response:
+        status_code = 200
+
+        def __init__(self, data):
+            self.data = data
+
+        def json(self):
+            return self.data
+
+    get_calls, post_calls = [], []
+    monkeypatch.setattr("requests.get", lambda *a, **kw: (get_calls.append(kw) or Response({"results": [{"name": "xabc@example.test"}], "count": 1})))
+    monkeypatch.setattr("requests.post", lambda *a, **kw: (post_calls.append((a, kw)) or Response({"address": "abc@example.test", "jwt": "test-jwt"})))
+    mailbox = CFWorkerMailbox(api_url="http://worker.invalid", domain="example.test")
+
+    account = mailbox.ensure_address("abc@example.test")
+
+    assert account.email == "abc@example.test"
+    assert account.account_id == "test-jwt"
+    assert post_calls[0][1]["json"] == {"name": "abc", "domain": "example.test", "enablePrefix": False}
+    assert get_calls[0]["params"]["query"] == "abc@example.test"
+
+
+def test_cfworker_ensure_address_rejects_unsupported_local_part_without_request(monkeypatch):
+    monkeypatch.setattr("requests.get", lambda *a, **kw: pytest.fail("unsupported address must not be queried"))
+    monkeypatch.setattr("requests.post", lambda *a, **kw: pytest.fail("unsupported address must not be created"))
+    mailbox = CFWorkerMailbox(api_url="http://worker.invalid", domain="example.test")
+
+    with pytest.raises(NotImplementedError):
+        mailbox.ensure_address("john.doe@example.test")
+
+
+def test_cfworker_ensure_address_rejects_rewritten_address(monkeypatch):
+    class Response:
+        status_code = 200
+
+        def json(self):
+            return {"results": [], "count": 0}
+
+    class Created(Response):
+        def json(self):
+            return {"address": "abc1@example.test", "jwt": "test-jwt"}
+
+    monkeypatch.setattr("requests.get", lambda *a, **kw: Response())
+    monkeypatch.setattr("requests.post", lambda *a, **kw: Created())
+    mailbox = CFWorkerMailbox(api_url="http://worker.invalid", domain="example.test")
+
+    with pytest.raises(RuntimeError):
+        mailbox.ensure_address("abc@example.test")
+
+
+def test_cfworker_ensure_address_rechecks_after_create_conflict(monkeypatch):
+    class Response:
+        status_code = 200
+
+        def __init__(self, data):
+            self.data = data
+
+        def json(self):
+            return self.data
+
+    gets = iter([
+        Response({"results": [], "count": 0}),
+        Response({"results": [{"name": "abc@example.test"}], "count": 1}),
+    ])
+    get_calls = []
+
+    class Conflict:
+        status_code = 409
+
+    monkeypatch.setattr("requests.get", lambda *a, **kw: (get_calls.append(kw) or next(gets)))
+    monkeypatch.setattr("requests.post", lambda *a, **kw: Conflict())
+    mailbox = CFWorkerMailbox(api_url="http://worker.invalid", domain="example.test")
+
+    account = mailbox.ensure_address("abc@example.test")
+
+    assert account.email == "abc@example.test"
+    assert account.account_id == ""
+    assert len(get_calls) == 2
+
+
+@pytest.mark.parametrize(
+    "response, message",
+    [
+        (type("HttpError", (), {"status_code": 401, "json": lambda self: {}})(), "HTTP"),
+        (type("HttpError", (), {"status_code": 500, "json": lambda self: {}})(), "HTTP"),
+        (type("BadJson", (), {"status_code": 200, "json": lambda self: (_ for _ in ()).throw(ValueError("bad json"))})(), "JSON"),
+        (type("NoResults", (), {"status_code": 200, "json": lambda self: {"count": 0}})(), "results"),
+        (type("Partial", (), {"status_code": 200, "json": lambda self: {"results": [], "count": 101}})(), "不完整"),
+    ],
+)
+def test_cfworker_ensure_address_fails_closed_on_untrusted_search(response, message, monkeypatch):
+    monkeypatch.setattr("requests.get", lambda *a, **kw: response)
+    mailbox = CFWorkerMailbox(api_url="http://worker.invalid", domain="example.test")
+
+    with pytest.raises(RuntimeError, match=message):
+        mailbox.ensure_address("abc@example.test")
 
 
 # ══════════════════════════════════════════════════════════════════════

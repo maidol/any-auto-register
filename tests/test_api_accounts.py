@@ -35,6 +35,16 @@ def test_create_account(client):
     assert "id" in data
 
 
+def test_manual_account_origin_round_trips_without_inferring_legacy_origin(client):
+    _create_account(client, email="manual@example.com", overview={"account_origin": "manual"})
+    _create_account(client, email="legacy@example.com")
+
+    items = {item["email"]: item for item in client.get("/api/accounts").json()["items"]}
+
+    assert items["manual@example.com"]["overview"]["account_origin"] == "manual"
+    assert "account_origin" not in items["legacy@example.com"]["overview"]
+
+
 def test_list_accounts_empty(client):
     resp = client.get("/api/accounts")
     assert resp.status_code == 200

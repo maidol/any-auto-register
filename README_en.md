@@ -59,8 +59,9 @@ Pair with the [`Any2API`](https://github.com/lxf746/any2api) gateway for an end-
 
 ### Account pool — unified multi-platform management
 
-Per-platform tabs, with passwords / steward / status / quota / payment link / last query time visible at a glance. Search, bulk import / export, copy single rows, open payment links.
+Per-platform tabs, with passwords / steward / status / quota / payment link / last query time visible at a glance. Search, bulk import / export, copy single rows, open payment links. Manually added accounts show a “Manually added” marker; existing accounts with unknown provenance are not inferred to be manual.
 
+The ChatGPT automatic-registration dialog has a “Reuse manually added invalid emails” switch, off by default. When enabled, it applies only to ChatGPT mailbox registration and only selects accounts explicitly marked as manually added and detected as invalid. With Cloudflare Worker, the email must use the configured domain and a lowercase alphanumeric local part; incompatible addresses are skipped.
 ![Account pool](assets/screenshots/账号池.png)
 
 ### Task queue — batch registration and history

@@ -27,7 +27,9 @@ from core.db import (
     TaskModel,
     engine,
     list_reusable_failed_accounts,
+    list_reusable_manual_invalid_accounts,
     mark_failed_account_reused,
+    mark_manual_invalid_account_reused,
     save_account,
     save_failed_account,
 )
@@ -835,7 +837,7 @@ def _create_openvpn_task_session(logger: TaskLogger | None = None):
 
 
 def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
-    from core.base_mailbox import MailboxAccount, PinnedMailbox
+    from core.base_mailbox import FallbackMailbox, MailboxAccount, PinnedMailbox
     from core.proxy_pool import proxy_pool
     from core.registration.errors import (
         FAILURE_CREATED,
@@ -1024,6 +1026,54 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
                     "已在 ChatGPT 建过号的注册失败账号不复用，留给 headless/headed 任务"
                 )
         if row is None:
+            if not extra.get("reuse_manual_invalid_emails"):
+                return
+            tried: set[str] = set()
+            for manual_row in list_reusable_manual_invalid_accounts(platform_name):
+                manual_email = manual_row["email"]
+                if manual_email in state["reused"] or manual_email in tried:
+                    continue
+                key = (platform_name, manual_email)
+                with _reused_failed_accounts_guard:
+                    if key in _reused_failed_accounts:
+                        continue
+                    _reused_failed_accounts.add(key)
+                try:
+                    if isinstance(shared_mailbox, FallbackMailbox):
+                        mailbox_account = shared_mailbox.ensure_address(
+                            manual_email,
+                            provider_key=str(extra.get("mail_provider") or ""),
+                        )
+                    else:
+                        mailbox_account = shared_mailbox.ensure_address(manual_email)
+                except Exception as exc:
+                    _release_failed_account(platform_name, manual_email)
+                    tried.add(manual_email)
+                    logger.log(
+                        f"手动无效邮箱候选跳过：邮箱服务不可用（{exc.__class__.__name__}）",
+                        level="warning",
+                    )
+                    continue
+                try:
+                    counted = mark_manual_invalid_account_reused(platform_name, manual_email)
+                except Exception as exc:
+                    _release_failed_account(platform_name, manual_email)
+                    tried.add(manual_email)
+                    logger.log(
+                        f"手动无效邮箱候选跳过：复用计数写入失败（{exc.__class__.__name__}）",
+                        level="warning",
+                    )
+                    continue
+                if not counted:
+                    _release_failed_account(platform_name, manual_email)
+                    tried.add(manual_email)
+                    continue
+                state["reused"].add(manual_email)
+                cycle["reused"] = manual_email
+                cycle["mailbox"] = PinnedMailbox(shared_mailbox, pinned=mailbox_account)
+                cycle["password"] = manual_row["password"]
+                logger.log("复用手动添加的无效邮箱")
+                return
             return
         state["reused"].add(row["email"])
         cycle["reused"] = row["email"]

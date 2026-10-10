@@ -48,6 +48,10 @@ class BaseMailbox(ABC):
         """等待并返回验证链接。默认由具体 provider 自行实现。"""
         raise NotImplementedError(f"{self.__class__.__name__} 暂不支持 wait_for_link()")
 
+    def ensure_address(self, email: str) -> MailboxAccount:
+        """验证或创建一个指定地址；默认不支持，且不尝试随机地址。"""
+        raise NotImplementedError(f"{self.__class__.__name__} 暂不支持指定邮箱地址")
+
     def close(self) -> None:
         """释放本 provider 持有的进程级资源（浏览器、线程池）。
 
@@ -102,6 +106,15 @@ class FallbackMailbox(BaseMailbox):
                 safe_print(f"[Mailbox] provider 失败: {provider_key} -> {message}")
                 continue
         raise RuntimeError("所有邮箱 provider 均创建失败: " + " | ".join(errors))
+
+    def ensure_address(self, email: str, *, provider_key: str) -> MailboxAccount:
+        for key, mailbox in self.providers:
+            if key != provider_key:
+                continue
+            account = mailbox.ensure_address(email)
+            self._accounts[str(account.email or "").strip()] = mailbox
+            return self._inject_provider_metadata(account, key)
+        raise RuntimeError(f"未找到指定邮箱 provider: {provider_key}")
 
     def get_current_ids(self, account: MailboxAccount) -> set:
         return self._resolve_mailbox(account).get_current_ids(account)
@@ -1199,21 +1212,8 @@ class CFWorkerMailbox(BaseMailbox):
         domain = str(self.domain or "").strip().lower()
         return bool(domain) and str(email or "").strip().lower().endswith("@" + domain)
 
-    def get_email(self) -> MailboxAccount:
-        import requests, random, string
-        name = "".join(random.choices(string.ascii_lowercase + string.digits, k=10))
-        payload = {"enablePrefix": True, "name": name}
-        if self.domain:
-            payload["domain"] = self.domain
-        r = requests.post(f"{self.api}/admin/new_address",
-            json=payload, headers=self._headers(),
-            proxies=self.proxy, timeout=15)
-        safe_print(f"[CFWorker] new_address status={r.status_code} resp={r.text[:200]}")
-        data = r.json()
-        email = data.get("email", data.get("address", ""))
-        token = data.get("token", data.get("jwt", ""))
+    def _mailbox_account(self, email: str, token: str = "") -> MailboxAccount:
         self._token = token
-        safe_print(f"[CFWorker] 生成邮箱: {email} token={'已获取' if token else 'NONE'}")
         return MailboxAccount(
             email=email,
             account_id=token,
@@ -1234,6 +1234,90 @@ class CFWorkerMailbox(BaseMailbox):
                 },
             },
         )
+
+    def get_email(self) -> MailboxAccount:
+        import requests, random, string
+        name = "".join(random.choices(string.ascii_lowercase + string.digits, k=10))
+        payload = {"enablePrefix": True, "name": name}
+        if self.domain:
+            payload["domain"] = self.domain
+        r = requests.post(f"{self.api}/admin/new_address",
+            json=payload, headers=self._headers(),
+            proxies=self.proxy, timeout=15)
+        safe_print(f"[CFWorker] new_address status={r.status_code} resp={r.text[:200]}")
+        data = r.json()
+        email = data.get("email", data.get("address", ""))
+        token = data.get("token", data.get("jwt", ""))
+        safe_print(f"[CFWorker] 生成邮箱: {email} token={'已获取' if token else 'NONE'}")
+        return self._mailbox_account(email, token)
+
+    def _address_exists(self, email: str) -> bool:
+        import requests
+
+        response = requests.get(
+            f"{self.api}/admin/address",
+            params={"query": email, "limit": 100, "offset": 0},
+            headers=self._headers(),
+            proxies=self.proxy,
+            timeout=15,
+        )
+        if not 200 <= response.status_code < 300:
+            raise RuntimeError("CF Worker 地址查询 HTTP 失败")
+        try:
+            data = response.json()
+        except Exception as exc:
+            raise RuntimeError("CF Worker 地址查询 JSON 无效") from exc
+        if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+            raise RuntimeError("CF Worker 地址查询缺少 results 列表")
+        results = data["results"]
+        for result in results:
+            if not isinstance(result, dict):
+                raise RuntimeError("CF Worker 地址查询结果格式无效")
+            if str(result.get("name", "")).lower() == email:
+                return True
+        try:
+            count = int(data["count"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError("CF Worker 地址查询缺少有效 count") from exc
+        if count > len(results):
+            raise RuntimeError("CF Worker 地址查询结果不完整")
+        return False
+
+    def ensure_address(self, email: str) -> MailboxAccount:
+        import re
+        import requests
+
+        normalized = str(email or "").strip().lower()
+        if normalized.count("@") != 1:
+            raise NotImplementedError("CF Worker 不支持该邮箱地址格式")
+        local, domain = normalized.rsplit("@", 1)
+        configured_domain = str(self.domain or "").strip().lower()
+        if domain != configured_domain or not re.fullmatch(r"[a-z0-9]+", local):
+            raise NotImplementedError("CF Worker 不支持该邮箱地址格式")
+
+        if self._address_exists(normalized):
+            return self._mailbox_account(normalized)
+
+        response = requests.post(
+            f"{self.api}/admin/new_address",
+            json={"name": local, "domain": domain, "enablePrefix": False},
+            headers=self._headers(),
+            proxies=self.proxy,
+            timeout=15,
+        )
+        if 200 <= response.status_code < 300:
+            try:
+                data = response.json()
+            except Exception as exc:
+                raise RuntimeError("CF Worker 创建邮箱返回 JSON 无效") from exc
+            created_email = str(data.get("address") or data.get("email") or "").strip().lower()
+            if created_email != normalized:
+                raise RuntimeError("CF Worker 创建邮箱返回了不同地址")
+            return self._mailbox_account(normalized, str(data.get("jwt") or ""))
+
+        if self._address_exists(normalized):
+            return self._mailbox_account(normalized)
+        raise RuntimeError("CF Worker 创建邮箱失败")
 
     def _get_mails(self, email: str) -> list:
         import requests

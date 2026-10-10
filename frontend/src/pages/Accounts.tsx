@@ -210,6 +210,7 @@ function RegisterModal({
   const [retryInterval, setRetryInterval] = useState(0)
   const [accountInterval, setAccountInterval] = useState(0)
   const [phoneRetryCount, setPhoneRetryCount] = useState(2)
+  const [reuseManualInvalidEmails, setReuseManualInvalidEmails] = useState(false)
   const [proxyMode, setProxyMode] = useState('pool')
   const [selection, setSelection] = useState({
     identityProvider: '',
@@ -339,6 +340,7 @@ function RegisterModal({
         oauth_email_hint: cfg.oauth_email_hint,
         chrome_user_data_dir: cfg.chrome_user_data_dir,
         chrome_cdp_url: cfg.chrome_cdp_url,
+        reuse_manual_invalid_emails: reuseManualInvalidEmails,
       }
       if (selection.identityProvider === 'mailbox') {
         if (!defaultMailboxProvider?.provider_key) {
@@ -450,6 +452,21 @@ function RegisterModal({
                   </div>
                 </div>
 
+                {platform === 'chatgpt' && selection.identityProvider === 'mailbox' && (
+                  <label className="flex items-start gap-2 rounded-xl border border-[var(--border)] bg-[var(--bg-hover)] px-4 py-3 text-sm text-[var(--text-primary)]">
+                    <input
+                      type="checkbox"
+                      checked={reuseManualInvalidEmails}
+                      onChange={e => setReuseManualInvalidEmails(e.target.checked)}
+                      className="mt-0.5 accent-[var(--accent)]"
+                    />
+                    <span>
+                      <span className="block font-medium">复用手动添加的无效邮箱</span>
+                      <span className="mt-1 block text-xs text-[var(--text-muted)]">默认关闭；仅使用账号来源为手动添加且检测为无效的邮箱。</span>
+                    </span>
+                  </label>
+                )}
+
                 <div>
                   <label className="text-xs text-[var(--text-muted)] block mb-1">代理来源</label>
                   <select
@@ -550,7 +567,7 @@ function AddModal({ platform, onClose, onDone }: { platform: string; onClose: ()
     try {
       await apiFetch('/accounts', {
         method: 'POST',
-        body: JSON.stringify({ ...form, platform }),
+        body: JSON.stringify({ ...form, platform, overview: { account_origin: 'manual' } }),
       })
       onDone()
     } finally { setSaving(false) }
@@ -2005,6 +2022,11 @@ export default function Accounts() {
                         </span>
                       );
                     })()}
+                    {getAccountOverview(acc).account_origin === 'manual' && (
+                      <span className="inline-flex items-center rounded-full bg-violet-500/10 px-2 py-0.5 text-[11px] font-medium text-violet-400 ring-1 ring-inset ring-violet-500/20">
+                        手动添加
+                      </span>
+                    )}
                     {primaryMetrics.length > 0 ? (
                       <div className="flex max-w-full flex-col gap-1">
                         {primaryMetrics.slice(0, 2).map((metric: any) => (
