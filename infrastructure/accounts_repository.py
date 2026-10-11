@@ -60,7 +60,8 @@ def _to_record(model: AccountModel, graph: dict | None = None) -> AccountRecord:
     plan_state = graph.get("plan_state") or "unknown"
     plan_name = graph.get("plan_name") or ""
     display_status = graph.get("display_status") or "registered"
-    if overview.get("sub2api_synced_at"):
+    # C2 修复：当 lifecycle_status 为 disabled 时，优先级高于 sub2api_synced_at 的 invalid 覆盖
+    if lifecycle_status != "disabled" and overview.get("sub2api_synced_at"):
         lifecycle_status = validity_status = display_status = "invalid"
     provider_resources = list(graph.get("provider_resources") or [])
     return AccountRecord(
@@ -166,11 +167,12 @@ class AccountsRepository:
                 "plan_state": item.plan_state,
                 "validity_status": item.validity_status,
             }, selection.status_filter)]
-        elif selection.select_all and not include_failed:
-            # 全选且没按状态筛选时不带出注册失败的账号：它们没有 token，
-            # 混进 Sub2API/CPA 导出就是一批空凭据，手动推 Sub2API 时还会
-            # 连续失败 3 次触发中止，把排在后面的好账号一起丢掉。
-            records = [item for item in records if item.lifecycle_status != "failed"]
+        elif selection.select_all:
+            # P4: 全选导出时（无论是否 include_failed），默认均排除停用账号
+            if not include_failed:
+                records = [item for item in records if item.lifecycle_status not in {"failed", "disabled"}]
+            else:
+                records = [item for item in records if item.lifecycle_status != "disabled"]
         return records
 
     def create(self, command: AccountCreateCommand) -> AccountRecord:
@@ -243,6 +245,56 @@ class AccountsRepository:
             session.commit()
             return self._load_records(session, [model])[0]
 
+    def set_disabled(self, account_id: int, *, disabled: bool) -> AccountRecord | None:
+        """P1: 专用停用/恢复启用仓储方法，负责维护 previous_lifecycle_status 与 disabled_at。"""
+        import time
+        from core.account_graph import patch_account_graph, _graph_for_account
+        with Session(engine) as session:
+            model = session.get(AccountModel, account_id)
+            if not model:
+                return None
+            current_graph = _graph_for_account(session, account_id)
+            current_lifecycle = current_graph.get("lifecycle_status") or "registered"
+            current_overview = dict(current_graph.get("overview") or {})
+
+            if disabled:
+                # 停用
+                if current_lifecycle == "disabled":
+                    # 已经是 disabled，幂等返回
+                    return self._load_records(session, [model])[0]
+                summary_updates = {
+                    "previous_lifecycle_status": current_lifecycle,
+                    "disabled_at": int(time.time()),
+                }
+                patch_account_graph(
+                    session,
+                    model,
+                    lifecycle_status="disabled",
+                    summary_updates=summary_updates,
+                )
+            else:
+                # 恢复启用
+                if current_lifecycle != "disabled":
+                    # 未处于 disabled，幂等返回
+                    return self._load_records(session, [model])[0]
+                prev_lifecycle = current_overview.get("previous_lifecycle_status")
+                if not prev_lifecycle or prev_lifecycle == "disabled":
+                    prev_lifecycle = "registered"
+                summary_updates = {
+                    "previous_lifecycle_status": "",
+                    "disabled_at": 0,
+                }
+                patch_account_graph(
+                    session,
+                    model,
+                    lifecycle_status=prev_lifecycle,
+                    summary_updates=summary_updates,
+                    allow_reenable=True,
+                )
+
+            session.commit()
+            return self._load_records(session, [model])[0]
+
     def delete(self, account_id: int) -> bool:
         with Session(engine) as session:
             model = session.get(AccountModel, account_id)
@@ -253,10 +305,26 @@ class AccountsRepository:
             session.commit()
             return True
 
-    def import_lines(self, platform: str, lines: list[AccountImportLine]) -> int:
+    def import_lines(self, platform: str, lines: list[AccountImportLine]) -> tuple[int, int]:
+        """P5/D1: 导入多行。遇到该平台已存在的停用账号则跳过，返回 (created, skipped_disabled)。"""
         created = 0
+        skipped_disabled = 0
         with Session(engine) as session:
+            # 查询该平台已停用账号的邮箱集合
+            existing_models = session.exec(select(AccountModel).where(AccountModel.platform == platform)).all()
+            graphs = load_account_graphs(session, [int(m.id) for m in existing_models if m.id])
+            disabled_emails = {
+                m.email.strip().lower()
+                for m in existing_models
+                if graphs.get(int(m.id), {}).get("lifecycle_status") == "disabled"
+            }
+
+            valid_lines: list[AccountImportLine] = []
             for line in lines:
+                if line.email.strip().lower() in disabled_emails:
+                    skipped_disabled += 1
+                    continue
+                valid_lines.append(line)
                 model = AccountModel(
                     platform=platform,
                     email=line.email,
@@ -264,6 +332,10 @@ class AccountsRepository:
                 )
                 session.add(model)
                 created += 1
+
+            if not valid_lines:
+                return 0, skipped_disabled
+
             session.commit()
             models = session.exec(
                 select(AccountModel)
@@ -271,7 +343,7 @@ class AccountsRepository:
                 .order_by(AccountModel.id.desc())
                 .limit(created)
             ).all()
-            by_email = {line.email: line for line in lines}
+            by_email = {line.email: line for line in valid_lines}
             for model in models:
                 line = by_email.get(model.email)
                 if not line:
@@ -341,7 +413,7 @@ class AccountsRepository:
                     replace_provider_resources=bool(extra.get("provider_resources")),
                 )
             session.commit()
-        return created
+        return created, skipped_disabled
 
     def stats(self) -> AccountStats:
         with Session(engine) as session:
@@ -371,6 +443,8 @@ class AccountsRepository:
 
     def export_csv(self, query: AccountQuery) -> str:
         _, items = self.list(query)
+        if not query.status:
+            items = [item for item in items if item.lifecycle_status != "disabled"]
         output = io.StringIO()
         writer = csv.writer(output)
         writer.writerow(

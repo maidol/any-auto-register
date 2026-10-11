@@ -149,6 +149,8 @@ def _derive_plan_name(overview: dict[str, Any]) -> str:
 
 
 def _derive_validity_status(lifecycle_status: str, overview: dict[str, Any]) -> str:
+    if lifecycle_status == "disabled":
+        return "disabled"
     if lifecycle_status == "invalid":
         return "invalid"
     if "valid" in overview:
@@ -161,6 +163,8 @@ def _derive_plan_state(
     overview: dict[str, Any],
     trial_end_time: int,
 ) -> str:
+    if lifecycle_status == "disabled":
+        return "disabled"
     explicit = _normalize_plan_state(overview.get("plan_state"))
     if explicit:
         return explicit
@@ -187,6 +191,8 @@ def _derive_display_status(
     validity_status: str,
     plan_state: str,
 ) -> str:
+    if lifecycle_status == "disabled":
+        return "disabled"
     if validity_status == "invalid":
         return "invalid"
     if plan_state == "expired" or lifecycle_status == "expired":
@@ -203,6 +209,8 @@ def recover_lifecycle_status_for_valid_account(graph: dict[str, Any]) -> str:
     lifecycle_status = _text(
         graph.get("lifecycle_status") or _safe_dict(graph.get("overview")).get("lifecycle_status")
     )
+    if lifecycle_status == "disabled":
+        return "disabled"
     if lifecycle_status and lifecycle_status != "invalid":
         return lifecycle_status
 
@@ -679,17 +687,25 @@ def _persist_account_graph(
     platform_credentials: list[dict[str, Any]],
     provider_accounts: list[dict[str, Any]],
     provider_resources: list[dict[str, Any]],
+    allow_reenable: bool = False,
 ) -> None:
-    normalized_summary = _normalize_overview_summary(
-        platform=platform,
-        lifecycle_status=_text(summary.get("lifecycle_status") or "registered") or "registered",
-        summary=summary,
-    )
     overview = session.exec(
         select(AccountOverviewModel).where(AccountOverviewModel.account_id == account_id)
     ).first()
     if not overview:
         overview = AccountOverviewModel(account_id=account_id)
+
+    target_lifecycle = _text(summary.get("lifecycle_status") or "registered") or "registered"
+    # C1 写侧闸：当前生命周期是 disabled、新值不是 disabled 且未授权 allow_reenable 时，锁定 disabled
+    if overview.lifecycle_status == "disabled" and target_lifecycle != "disabled" and not allow_reenable:
+        target_lifecycle = "disabled"
+        summary["lifecycle_status"] = "disabled"
+
+    normalized_summary = _normalize_overview_summary(
+        platform=platform,
+        lifecycle_status=target_lifecycle,
+        summary=summary,
+    )
     overview.lifecycle_status = normalized_summary["lifecycle_status"]
     overview.validity_status = normalized_summary["validity_status"]
     overview.plan_state = normalized_summary["plan_state"]
@@ -933,6 +949,7 @@ def patch_account_graph(
     provider_resources: list[dict[str, Any]] | None = None,
     replace_provider_accounts: bool = False,
     replace_provider_resources: bool = False,
+    allow_reenable: bool = False,
 ) -> None:
     account_id = int(model.id or 0)
     if account_id <= 0:
@@ -1020,6 +1037,7 @@ def patch_account_graph(
         platform_credentials=credentials,
         provider_accounts=next_provider_accounts,
         provider_resources=next_provider_resources,
+        allow_reenable=allow_reenable,
     )
 
 

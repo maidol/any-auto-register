@@ -18,4 +18,6 @@ def check_account(account_id: int):
     result = service.check_one_async(account_id)
     if not result:
         raise HTTPException(404, "账号不存在")
+    if result.get("status") == "disabled":
+        raise HTTPException(409, result.get("error", "账号已停用"))
     return result

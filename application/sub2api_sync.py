@@ -324,7 +324,12 @@ class Sub2ApiSyncService:
         instance_url = self._configured_base_url(settings)
         with _SYNC_LOCK:
             items = self.repository.select_for_export(selection)
-            return self._push(client, items, group_id, instance_url)
+            # P4: 推送前去掉停用账号，跳过数计入 skipped
+            valid_items = [item for item in items if item.lifecycle_status != "disabled"]
+            skipped_disabled = len(items) - len(valid_items)
+            res = self._push(client, valid_items, group_id, instance_url)
+            res["skipped"] = res.get("skipped", 0) + skipped_disabled
+            return res
 
     def sync_new_accounts(self) -> dict | None:
         """定时入口。未开启返回 None；第一次看到开启只记起点、不推。"""
@@ -350,10 +355,14 @@ class Sub2ApiSyncService:
             )
             items = [
                 item for item in items
-                if (
-                    item.lifecycle_status in AUTO_SYNC_STATUSES
-                    and (_as_utc(item.created_at) or since) >= since
-                ) or self._has_pending_sub2api_work(item)
+                if item.lifecycle_status != "disabled"
+                and (
+                    (
+                        item.lifecycle_status in AUTO_SYNC_STATUSES
+                        and (_as_utc(item.created_at) or since) >= since
+                    )
+                    or self._has_pending_sub2api_work(item)
+                )
             ]
             return self._push(client, items, group_id, instance_url)
 

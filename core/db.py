@@ -504,6 +504,7 @@ def list_reusable_manual_invalid_accounts(platform: str) -> list[dict]:
             .where(AccountModel.platform == platform)
             .where(AccountOverviewModel.validity_status == "invalid")
             .where(AccountOverviewModel.lifecycle_status != AccountStatus.FAILED.value)
+            .where(AccountOverviewModel.lifecycle_status != AccountStatus.DISABLED.value)
             .order_by(AccountModel.id)
         ).all()
         graphs = load_account_graphs(session, [int(model.id) for model in models])

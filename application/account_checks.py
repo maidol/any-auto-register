@@ -15,8 +15,11 @@ class AccountChecksService:
         return task
 
     def check_one_async(self, account_id: int) -> dict | None:
-        if not self.repository.get(account_id):
+        acc = self.repository.get(account_id)
+        if not acc:
             return None
+        if acc.lifecycle_status == "disabled":
+            return {"status": "disabled", "error": "账号已停用"}
         task = create_account_check_task(account_id)
         task_runtime.wake_up()
         return task

@@ -26,14 +26,17 @@ def list_capabilities(platform: str):
 
 @router.post("/{platform}/{account_id}/{action_id}")
 def execute_action(platform: str, account_id: int, action_id: str, body: ActionRequest):
-    task = service.execute_action(
-        ActionExecutionCommand(
-            platform=platform,
-            account_id=account_id,
-            action_id=action_id,
-            params=body.params,
+    try:
+        task = service.execute_action(
+            ActionExecutionCommand(
+                platform=platform,
+                account_id=account_id,
+                action_id=action_id,
+                params=body.params,
+            )
         )
-    )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
     if not task:
         raise HTTPException(400, "任务创建失败")
     return task

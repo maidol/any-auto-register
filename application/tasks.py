@@ -613,6 +613,18 @@ def _run_single_account_check(account_id: int, logger: TaskLogger | None = None)
         if not model:
             raise ValueError("账号不存在")
         graph = load_account_graphs(session, [account_id]).get(account_id, {})
+        if graph.get("lifecycle_status") == "disabled":
+            result = {
+                "account_id": account_id,
+                "valid": False,
+                "platform": model.platform,
+                "email": model.email,
+                "skipped": True,
+                "reason": "disabled",
+            }
+            if logger:
+                logger.log(f"{model.email}: 账号已停用，跳过本地检查")
+            return False, result
         if (graph.get("overview") or {}).get("sub2api_synced_at"):
             result = {
                 "account_id": account_id,
@@ -865,6 +877,21 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
     platform_name = str(payload.get("platform", ""))
     email = payload.get("email") or None
     password = payload.get("password") or None
+
+    # N3: 注册固定邮箱前置检查：若指定邮箱已存在且已停用，直接报错拒绝
+    if email:
+        with Session(engine) as session:
+            existing = session.exec(
+                select(AccountModel)
+                .where(AccountModel.platform == platform_name)
+                .where(AccountModel.email == str(email).strip())
+            ).first()
+            if existing:
+                egraph = load_account_graphs(session, [int(existing.id)]).get(int(existing.id), {})
+                if egraph.get("lifecycle_status") == "disabled":
+                    logger.log(f"指定邮箱 {email} 已停用，无法用于注册", level="error")
+                    logger.finish(TASK_STATUS_FAILED, error=f"指定邮箱 {email} 已停用，无法用于注册")
+                    return
     proxy = payload.get("proxy") or None
     proxy_mode = str(payload.get("proxy_mode", "pool") or "pool").strip().lower()
     extra = dict(payload.get("extra") or {})

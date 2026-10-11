@@ -252,7 +252,26 @@ def get_account(account_id: int):
 
 @router.patch("/{account_id}")
 def update_account(account_id: int, body: AccountUpdateRequest):
-    item = service.update_account(account_id, AccountUpdateCommand(**body.model_dump()))
+    try:
+        item = service.update_account(account_id, AccountUpdateCommand(**body.model_dump()))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if not item:
+        raise HTTPException(404, "账号不存在")
+    return item
+
+
+@router.post("/{account_id}/disable")
+def disable_account(account_id: int):
+    item = service.disable_account(account_id)
+    if not item:
+        raise HTTPException(404, "账号不存在")
+    return item
+
+
+@router.post("/{account_id}/enable")
+def enable_account(account_id: int):
+    item = service.enable_account(account_id)
     if not item:
         raise HTTPException(404, "账号不存在")
     return item

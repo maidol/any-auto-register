@@ -15,7 +15,7 @@ import { RefreshCw, Copy, ExternalLink, Download, Upload, Plus, X, Mail, Trash2,
 
 const STATUS_VARIANT: Record<string, any> = {
   registered: 'default', trial: 'success', subscribed: 'success',
-  expired: 'warning', invalid: 'danger', failed: 'danger',
+  expired: 'warning', invalid: 'danger', failed: 'danger', disabled: 'secondary',
   free: 'secondary', eligible: 'secondary', valid: 'success', unknown: 'secondary',
 }
 
@@ -1247,12 +1247,47 @@ function ActionMenu({
                     }
                     runAction(a, {})
                   }}
-                  disabled={!!running}
+                  disabled={!!running || acc.lifecycle_status === 'disabled'}
                   className="w-full px-3 py-2 text-left text-xs text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] disabled:opacity-50">
                   {running === a.id ? '执行中...' : a.label}
                 </button>
               ))}
               <div className="my-1 border-t border-[var(--border)]/70" />
+              {acc.lifecycle_status !== 'disabled' ? (
+                <button
+                  onClick={() => {
+                    setOpen(false)
+                    if (confirm(`确认停用账号 ${acc.email} 吗？停用后将处于游离状态，无法用于检测、刷新与注册任务。`)) {
+                      apiFetch(`/accounts/${acc.id}/disable`, { method: 'POST' }).then(() => {
+                        setToast({ type: 'success', text: '账号已停用' })
+                        onChanged()
+                      }).catch((e: any) => {
+                        setToast({ type: 'error', text: e?.message || '停用失败' })
+                      })
+                    }
+                  }}
+                  className="w-full px-3 py-2 text-left text-xs text-amber-400 transition-colors hover:bg-amber-500/10 hover:text-amber-300"
+                >
+                  停用
+                </button>
+              ) : (
+                <button
+                  onClick={() => {
+                    setOpen(false)
+                    if (confirm(`确认恢复启用账号 ${acc.email} 吗？`)) {
+                      apiFetch(`/accounts/${acc.id}/enable`, { method: 'POST' }).then(() => {
+                        setToast({ type: 'success', text: '账号已恢复启用' })
+                        onChanged()
+                      }).catch((e: any) => {
+                        setToast({ type: 'error', text: e?.message || '启用失败' })
+                      })
+                    }
+                  }}
+                  className="w-full px-3 py-2 text-left text-xs text-emerald-400 transition-colors hover:bg-emerald-500/10 hover:text-emerald-300"
+                >
+                  恢复启用
+                </button>
+              )}
               <button
                 onClick={() => {
                   setOpen(false)
@@ -1475,7 +1510,8 @@ function ImportModal({ platform, onClose, onDone }: { platform: string; onClose:
     try {
       const lines = text.trim().split('\n').filter(Boolean)
       const res = await apiFetch('/accounts/import', { method: 'POST', body: JSON.stringify({ platform, lines }) })
-      setResult(`导入成功 ${res.created} 个`); onDone()
+      const skippedMsg = res.skipped_disabled > 0 ? `，跳过已停用 ${res.skipped_disabled} 个` : ''
+      setResult(`导入成功 ${res.created} 个${skippedMsg}`); onDone()
     } catch (e: any) { setResult(`失败: ${e.message}`) } finally { setLoading(false) }
   }
   return (
@@ -1815,6 +1851,7 @@ export default function Accounts() {
               <option value="expired">已过期</option>
               <option value="invalid">已失效</option>
               <option value="failed">注册失败</option>
+              <option value="disabled">已停用</option>
             </select>
           </div>
           
@@ -1952,7 +1989,7 @@ export default function Accounts() {
                 const primaryMetrics = getPrimaryMetrics(acc)
                 const displayBadges = getDisplayBadges(acc)
                 return (
-              <tr key={acc.id} className="group border-b border-[var(--border)]/30 hover:bg-[var(--text-primary)]/[0.02] transition-colors cursor-pointer"
+              <tr key={acc.id} className={`group border-b border-[var(--border)]/30 hover:bg-[var(--text-primary)]/[0.02] transition-colors cursor-pointer ${acc.lifecycle_status === 'disabled' ? 'opacity-60 bg-[var(--bg-hover)]/30' : ''}`}
                   onClick={() => setDetail(acc)}>
                 <td className="px-3 py-2.5" onClick={e => e.stopPropagation()}>
                   <input

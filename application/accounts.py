@@ -59,7 +59,21 @@ class AccountsService:
         return self._serialize(self.repository.create(command))
 
     def update_account(self, account_id: int, command: AccountUpdateCommand) -> dict | None:
+        # P1/C5: PATCH 不允许碰触 disabled 状态
+        current = self.repository.get(account_id)
+        if not current:
+            return None
+        if current.lifecycle_status == "disabled" or command.lifecycle_status == "disabled":
+            raise ValueError("账号已停用或不可直接变更停用状态，请通过专门的停用/恢复启用接口操作")
         item = self.repository.update(account_id, command)
+        return self._serialize(item) if item else None
+
+    def disable_account(self, account_id: int) -> dict | None:
+        item = self.repository.set_disabled(account_id, disabled=True)
+        return self._serialize(item) if item else None
+
+    def enable_account(self, account_id: int) -> dict | None:
+        item = self.repository.set_disabled(account_id, disabled=False)
         return self._serialize(item) if item else None
 
     def delete_account(self, account_id: int) -> dict:
@@ -116,7 +130,8 @@ class AccountsService:
                 except Exception:
                     extra = {"cashier_url": _decode_import_token(payload)}
             parsed.append(AccountImportLine(email=email, password=password, extra=extra))
-        return {"created": self.repository.import_lines(platform, parsed)}
+        created, skipped_disabled = self.repository.import_lines(platform, parsed)
+        return {"created": created, "skipped_disabled": skipped_disabled}
 
     def export_csv(self, query: AccountQuery) -> str:
         return self.repository.export_csv(query)

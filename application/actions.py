@@ -40,6 +40,12 @@ class ActionsService:
         return any(a.id == action_id and a.sync for a in actions)
 
     def execute_action(self, command: ActionExecutionCommand) -> dict:
+        # P3/C7: 动作守卫加在同步/异步分支之前
+        from infrastructure.accounts_repository import AccountsRepository
+        acc = AccountsRepository().get(command.account_id)
+        if acc and acc.lifecycle_status == "disabled":
+            raise ValueError("账号已停用，无法执行平台动作")
+
         if self._is_sync_action(command.platform, command.action_id):
             result = self.runtime.execute_action(command)
             return {"sync": True, "ok": result.ok, "data": result.data, "error": result.error}
