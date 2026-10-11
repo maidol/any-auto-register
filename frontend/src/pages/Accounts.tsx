@@ -461,8 +461,8 @@ function RegisterModal({
                       className="mt-0.5 accent-[var(--accent)]"
                     />
                     <span>
-                      <span className="block font-medium">复用手动添加的无效邮箱</span>
-                      <span className="mt-1 block text-xs text-[var(--text-muted)]">默认关闭；仅使用账号来源为手动添加且检测为无效的邮箱。</span>
+                      <span className="block font-medium">复用未完成注册或手动添加的邮箱</span>
+                      <span className="mt-1 block text-xs text-[var(--text-muted)]">默认关闭；开启后优先复用账号列表中未完成注册的邮箱，其次复用手动添加且检测为无效的邮箱，并在所选邮箱服务中确认或创建该地址。</span>
                     </span>
                   </label>
                 )}

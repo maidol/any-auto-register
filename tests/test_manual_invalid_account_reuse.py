@@ -123,7 +123,7 @@ def test_manual_invalid_email_is_opt_in_and_preserves_failed_account_path(monkey
     _manual_row("not-opted-in@example.test")
     world = _manual_world(monkeypatch, outcomes=["ok"])
 
-    world.run(count=1, retry_count=0)
+    world.run(count=1, retry_count=0, extra={"reuse_manual_invalid_emails": False})
 
     assert world.mailbox.ensure_calls == []
     assert world.emails == ["box1@example.com"]
@@ -165,7 +165,7 @@ def test_existing_failed_account_remains_ahead_of_manual_candidate(monkeypatch):
     world.run(count=1, retry_count=0, extra={"reuse_manual_invalid_emails": True})
 
     assert world.emails == ["existing@reuse.test"]
-    assert world.mailbox.ensure_calls == []
+    assert world.mailbox.ensure_calls == ["existing@reuse.test"]
 
 
 def test_manual_reuse_calls_only_selected_provider_when_mailbox_is_fallback(monkeypatch):

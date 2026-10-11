@@ -253,6 +253,18 @@ def _world(monkeypatch, **kw):
     w = world(monkeypatch, **kw)
     # 能按地址读 @reuse.test 的邮箱，模拟 CF Worker 配了这个域名。
     w.mailbox.can_read_address = lambda email: email.endswith("@reuse.test")
+    w.mailbox.ensure_address = lambda email: MailboxAccount(email=email, account_id="ensured-token")
+    # 这些旧路径测试显式开启复用；default-off 行为由对应回归用例单独覆盖。
+    original_run = w.run
+
+    def run(**payload):
+        extra = dict(payload.get("extra") or {})
+        extra.setdefault("reuse_manual_invalid_emails", True)
+        payload["extra"] = extra
+        return original_run(**payload)
+
+    w.run = run
+    w.run_without_default = original_run
     # 用真的 save_account：成功之后那条失败行要真的变成已注册。
     monkeypatch.setattr("application.tasks.save_account", db_module.save_account)
     return w
@@ -260,6 +272,56 @@ def _world(monkeypatch, **kw):
 
 def _resume_stage(attempt: dict) -> str:
     return str((attempt["extra"].get("registration_resume") or {}).get("stage") or "")
+
+
+def test_failed_account_reuse_is_disabled_without_the_opt_in(monkeypatch):
+    _failed("opt-in@reuse.test", "not_created")
+    w = _world(monkeypatch, outcomes=["ok"])
+
+    w.run(count=1, retry_count=0, extra={"reuse_manual_invalid_emails": False})
+
+    assert w.emails == ["box1@example.com"]
+    assert "reuse_attempts" not in _overview("opt-in@reuse.test")
+
+
+def test_failed_account_reuse_is_off_when_the_switch_is_omitted(monkeypatch):
+    _failed("omitted@reuse.test", "not_created")
+    w = _world(monkeypatch, outcomes=["ok"])
+    ensure_calls = []
+    w.mailbox.ensure_address = lambda email: ensure_calls.append(email) or MailboxAccount(email=email)
+
+    w.run_without_default(count=1, retry_count=0)
+
+    assert w.emails == ["box1@example.com"]
+    assert ensure_calls == []
+    assert "reuse_attempts" not in _overview("omitted@reuse.test")
+
+
+def test_failed_account_address_is_ensured_before_reuse(monkeypatch):
+    _failed("missing@reuse.test", "not_created")
+    w = _world(monkeypatch, outcomes=["ok"])
+    ensure_calls = []
+
+    def ensure_address(email):
+        ensure_calls.append(email)
+        return MailboxAccount(email=email, account_id="ensured-token")
+
+    w.mailbox.ensure_address = ensure_address
+    w.run(count=1, retry_count=0, extra={"reuse_manual_invalid_emails": True})
+
+    assert w.emails == ["missing@reuse.test"]
+    assert ensure_calls == ["missing@reuse.test"]
+
+
+def test_failed_account_address_failure_does_not_consume_reuse_count(monkeypatch):
+    _failed("not-provisioned@reuse.test", "not_created")
+    w = _world(monkeypatch, outcomes=["ok"])
+    w.mailbox.ensure_address = lambda _email: (_ for _ in ()).throw(RuntimeError("provider unavailable"))
+
+    w.run(count=1, retry_count=0)
+
+    assert w.emails == ["box1@example.com"]
+    assert "reuse_attempts" not in _overview("not-provisioned@reuse.test")
 
 
 def test_a_created_failed_account_is_reused_and_goes_straight_to_oauth(monkeypatch):

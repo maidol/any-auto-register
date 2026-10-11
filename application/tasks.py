@@ -84,7 +84,13 @@ def _claim_failed_account(platform_name: str, mailbox, mail_provider: str, skip:
     """
     from core.registration.errors import FAILURE_CREATED, FAILURE_OAUTH
 
-    can_read = getattr(mailbox, "can_read_address", None)
+    from core.base_mailbox import FallbackMailbox
+
+    if isinstance(mailbox, FallbackMailbox):
+        selected = next((item for key, item in mailbox.providers if key == mail_provider), None)
+        can_read = getattr(selected, "can_read_address", None)
+    else:
+        can_read = getattr(mailbox, "can_read_address", None)
     if not callable(can_read):
         return None
     for row in list_reusable_failed_accounts(platform_name):
@@ -101,7 +107,6 @@ def _claim_failed_account(platform_name: str, mailbox, mail_provider: str, skip:
             if key in _reused_failed_accounts:
                 continue
             _reused_failed_accounts.add(key)
-        mark_failed_account_reused(platform_name, row["email"])
         return row
     return None
 
@@ -1005,18 +1010,56 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
             )
         cycle["mailbox"] = PinnedMailbox(shared_mailbox) if shared_mailbox is not None else None
         cycle["open"] = True
-        # 需求 20260926 第 2 条：账号列表里有注册失败的账号，就先复用它的邮箱和密码。
-        # 已经在 ChatGPT 建过号的直接续做 Codex OAuth，没建过的走完整注册。
-        if platform_name != "chatgpt" or email or shared_mailbox is None:
+        # 仅在显式开启时，从账号列表复用未完成注册的账号或手动添加的无效邮箱。
+        if (
+            platform_name != "chatgpt"
+            or email
+            or shared_mailbox is None
+            or not extra.get("reuse_manual_invalid_emails")
+        ):
             return
         # registration_resume 只有浏览器适配器读；protocol 拿到已建号的邮箱会重进注册，
         # 然后因为没有 create_account 的 callback 失败，碰到 add_phone 也直接 raise。
         executor_type = str(payload.get("executor_type", "protocol") or "protocol")
         created_ok = executor_type in ("headless", "headed")
-        row = _claim_failed_account(
-            platform_name, shared_mailbox, str(extra.get("mail_provider") or ""), state["reused"],
-            created_ok=created_ok,
-        )
+        failed_tried: set[str] = set()
+        row = None
+        while True:
+            row = _claim_failed_account(
+                platform_name,
+                shared_mailbox,
+                str(extra.get("mail_provider") or ""),
+                state["reused"] | failed_tried,
+                created_ok=created_ok,
+            )
+            if row is None:
+                break
+            try:
+                if isinstance(shared_mailbox, FallbackMailbox):
+                    mailbox_account = shared_mailbox.ensure_address(
+                        row["email"], provider_key=str(extra.get("mail_provider") or ""),
+                    )
+                else:
+                    mailbox_account = shared_mailbox.ensure_address(row["email"])
+            except Exception as exc:
+                _release_failed_account(platform_name, row["email"])
+                failed_tried.add(row["email"])
+                logger.log(
+                    f"未完成注册邮箱候选跳过：邮箱服务不可用（{exc.__class__.__name__}）",
+                    level="warning",
+                )
+                continue
+            try:
+                mark_failed_account_reused(platform_name, row["email"])
+            except Exception as exc:
+                _release_failed_account(platform_name, row["email"])
+                failed_tried.add(row["email"])
+                logger.log(
+                    f"未完成注册邮箱候选跳过：复用计数写入失败（{exc.__class__.__name__}）",
+                    level="warning",
+                )
+                continue
+            break
         if not created_ok and not state["created_noted"]:
             state["created_noted"] = True
             if any(r["failure_stage"] in (FAILURE_CREATED, FAILURE_OAUTH)
@@ -1026,8 +1069,6 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
                     "已在 ChatGPT 建过号的注册失败账号不复用，留给 headless/headed 任务"
                 )
         if row is None:
-            if not extra.get("reuse_manual_invalid_emails"):
-                return
             tried: set[str] = set()
             for manual_row in list_reusable_manual_invalid_accounts(platform_name):
                 manual_email = manual_row["email"]
@@ -1077,7 +1118,7 @@ def _execute_register_task(payload: dict[str, Any], logger: TaskLogger) -> None:
             return
         state["reused"].add(row["email"])
         cycle["reused"] = row["email"]
-        cycle["mailbox"] = PinnedMailbox(shared_mailbox, pinned=MailboxAccount(email=row["email"]))
+        cycle["mailbox"] = PinnedMailbox(shared_mailbox, pinned=mailbox_account)
         cycle["password"] = row["password"]
         created = row["failure_stage"] in (FAILURE_CREATED, FAILURE_OAUTH)
         if created:

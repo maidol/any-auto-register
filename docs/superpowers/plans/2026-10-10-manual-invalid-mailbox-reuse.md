@@ -2,9 +2,9 @@
 
 > **Execution:** Use superpowers:executing-plans to implement this plan task-by-task in the current session. Do not delegate to agents. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Allow an opt-in ChatGPT mailbox registration task to reuse manually added invalid account emails after the selected mailbox provider authoritatively verifies or creates the exact mailbox address.
+**Goal:** Allow an opt-in ChatGPT mailbox registration task to reuse incomplete-registration accounts or manually added invalid accounts after the selected mailbox provider authoritatively verifies or creates the exact mailbox address.
 
-**Architecture:** Store `account_origin: "manual"` in the existing account overview JSON and expose it through the existing account record API. Add a default-off registration option, query only explicitly manual + invalid + password-bearing candidates, and route candidates through an optional exact-address provider capability delegated only to the task's selected primary provider. Preserve the existing failed-account reuse path and fail closed whenever provider address existence or exact-address creation is uncertain.
+**Architecture:** Store `account_origin: "manual"` in the existing account overview JSON and expose it through the existing account record API. Add a default-off registration option covering both lifecycle-failed accounts and explicitly manual + invalid + password-bearing candidates. Route either candidate through an optional exact-address provider capability delegated only to the task's selected primary provider, and fail closed whenever provider address existence or exact-address creation is uncertain.
 
 **Tech Stack:** React/TypeScript, FastAPI/Pydantic, Python, SQLModel account overview graph, pytest, existing frontend build/test tooling.
 
@@ -114,7 +114,7 @@ Expected: all new candidate and cap cases pass and existing failed-account seman
 
 - [x] **Step 1: Add task behavior tests for the opt-in boundary**
 
-Cover: toggle absent/false preserves current failed-account behavior and never queries manual candidates; true selects eligible manual records only after the existing failed candidate path returns none; explicit task email, non-ChatGPT platform, non-mailbox identity, provider lacking capability, provider error, and unconfirmed address state do not register the manual row; ensure-address failures leave lifecycle/validity/origin unchanged and never add rows to `list_reusable_failed_accounts`; rows with failed lifecycle are excluded from the manual query; successful `ensure_address` pins the exact returned `MailboxAccount` and stored account password, successful account save preserves `overview.account_origin`, and failed candidates are skipped without consuming their use count.
+Cover: toggle absent/false does not reuse either candidate category; true reuses eligible lifecycle-failed rows first and manual-invalid rows only when no failed row can be prepared; both categories call the selected provider's exact-address capability before registration; explicit task email, non-ChatGPT platform, non-mailbox identity, provider lacking capability, provider error, and unconfirmed address state do not register the candidate; failed ensure-address attempts do not consume reuse counts; manual candidate failures leave lifecycle/validity/origin unchanged and never add rows to `list_reusable_failed_accounts`; rows with failed lifecycle are excluded from the manual query; successful `ensure_address` pins the exact returned `MailboxAccount` and stored account password, and successful account save preserves `overview.account_origin`.
 
 - [x] **Step 2: Run the focused tests and confirm they fail**
 
@@ -123,7 +123,7 @@ Expected before implementation: opt-in integration cases fail because manual can
 
 - [x] **Step 3: Implement the toggle and registration gate**
 
-Add a `reuseManualInvalidEmails` state defaulting to `false` in `Accounts.RegisterModal`. Render a switch labeled “复用手动添加的无效邮箱” for the ChatGPT mailbox flow and send `extra.reuse_manual_invalid_emails` as a boolean. In `_execute_register_task`'s current ChatGPT cycle opening path, keep `_claim_failed_account` first and unchanged. For a manual candidate, perform these steps in order: (1) reserve `(platform, email)` using `_reused_failed_accounts` and its guard; (2) call `ensure_address`; (3) on failure release via `_release_failed_account`, skip without incrementing, and try the next row; (4) on success increment `manual_reuse_attempts`; (5) set `cycle["reused"]` and pin the exact returned `MailboxAccount` plus the row password so normal cycle cleanup releases the reservation. When `shared_mailbox` is `FallbackMailbox`, call `ensure_address(email, provider_key=extra["mail_provider"])`; for a single provider, call `ensure_address(email)`. Do not construct a replacement `MailboxAccount(email=...)`. On unsupported/error outcomes, log a sanitized skip reason; never log password, provider secrets, tokens or raw sensitive response content.
+Add a `reuseManualInvalidEmails` state defaulting to `false` in `Accounts.RegisterModal`. Render a switch labeled “复用未完成注册或手动添加的邮箱” for the ChatGPT mailbox flow and send `extra.reuse_manual_invalid_emails` as a boolean. In `_execute_register_task`, return before either candidate query unless this flag is true. For lifecycle-failed candidates, reserve `(platform, email)`, call the selected provider's `ensure_address`, and only then increment `reuse_attempts`; on failure release the reservation, skip without incrementing, and continue to the next failed row. If no failed candidate is successfully prepared, try manual-invalid rows with the existing `manual_reuse_attempts` accounting. In both paths, pin the exact returned `MailboxAccount` and stored row password so normal cycle cleanup releases the reservation. When `shared_mailbox` is `FallbackMailbox`, call `ensure_address(email, provider_key=extra["mail_provider"])`; for a single provider, call `ensure_address(email)`. Do not construct a replacement `MailboxAccount(email=...)`. On unsupported/error outcomes, log a sanitized skip reason; never log password, provider secrets, tokens or raw sensitive response content.
 
 - [x] **Step 4: Run focused workflow and UI checks**
 
@@ -141,7 +141,7 @@ Expected: all listed relevant tests pass. Run frontend build/type check once aft
 
 - [x] **Step 2: Review diff and safety properties**
 
-Run `git diff --check`; inspect the diff for: manual origin only on manual AddModal creation, legacy origins remaining unknown, selected-provider-only operations, existing failed-account behavior unchanged, strict no-mailbox-existence inference from empty message lists, skip-without-consuming on adapter failure, and no sensitive material in logs.
+Run `git diff --check`; inspect the diff for: manual origin only on manual AddModal creation, legacy origins remaining unknown, selected-provider-only operations for both candidate categories, reuse disabled unless the toggle is true, strict no-mailbox-existence inference from empty message lists, skip-without-consuming on adapter failure, and no sensitive material in logs.
 
 - [x] **Step 3: Verify CF Worker failure-closed invariants**
 
@@ -162,3 +162,9 @@ Do not call the real CF Worker service; the user requested mock-only validation.
 ```
 
 Report the live-probe deviation and test evidence to the reviewer. Do not commit, push, open a PR, or publish without the user's separate authorization.
+
+## Production feedback correction (2026-10-10)
+
+The deployed behavior showed that the switch only gated manual-invalid rows while the older lifecycle-failed reuse path remained unconditional, and lifecycle-failed rows bypassed `ensure_address`. Correct both gaps: the same default-off switch gates both sources, lifecycle-failed rows retain priority, and both sources must be verified/created by the selected provider before being pinned. Non-CF Worker providers without exact-address support fail closed and are skipped.
+
+Files: `application/tasks.py`, `frontend/src/pages/Accounts.tsx`, `tests/test_failed_account_reuse.py`, `tests/test_manual_invalid_account_reuse.py`, `README.md`, `README_en.md`, and this plan/spec documentation.
