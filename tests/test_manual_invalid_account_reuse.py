@@ -1,6 +1,8 @@
 """Manual-origin invalid account email reuse regression tests."""
 from __future__ import annotations
 
+import pytest
+
 from domain.accounts import AccountCreateCommand
 from infrastructure.accounts_repository import AccountsRepository
 from core import db as db_module
@@ -250,3 +252,91 @@ def test_manual_reuse_is_skipped_for_non_mailbox_identity(monkeypatch):
     })
 
     assert world.mailbox.ensure_calls == []
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 手动无效邮箱已在 ChatGPT 建号、之后失败：要变成「已建号」的注册失败行，
+# 下次复用才会从 OAuth 开始，而不是再走一遍完整注册。
+# ══════════════════════════════════════════════════════════════════════
+
+@pytest.mark.parametrize("stage", ["created_oauth_failed", "created_other_failed"])
+def test_created_failure_turns_manual_invalid_row_into_failed_row(stage):
+    _manual_row("created@example.test")
+
+    written = db_module.save_failed_account(
+        "chatgpt", "created@example.test", "ManualPw123!",
+        failure_stage=stage, failure_reason="oauth boom",
+    )
+
+    overview = _overview("created@example.test")
+    assert written is True
+    assert overview["lifecycle_status"] == "failed"
+    assert overview["failure_stage"] == stage
+    assert overview["account_origin"] == "manual"
+    failed = {row["email"]: row for row in db_module.list_reusable_failed_accounts("chatgpt")}
+    assert failed["created@example.test"]["failure_stage"] == stage
+    assert failed["created@example.test"]["password"] == "ManualPw123!"
+    assert db_module.list_reusable_manual_invalid_accounts("chatgpt") == []
+
+
+@pytest.mark.parametrize("stage", ["not_created", "unknown"])
+def test_failure_without_created_account_leaves_manual_row_alone(stage):
+    _manual_row("not-created@example.test")
+
+    written = db_module.save_failed_account(
+        "chatgpt", "not-created@example.test", "ManualPw123!",
+        failure_stage=stage, failure_reason="boom",
+    )
+
+    overview = _overview("not-created@example.test")
+    assert written is False
+    assert overview["lifecycle_status"] == "registered"
+    assert "failure_stage" not in overview
+
+
+@pytest.mark.parametrize("kwargs", [{"valid": True}, {"account_origin": None}])
+def test_created_failure_never_touches_valid_or_non_manual_rows(kwargs):
+    _manual_row("keep@example.test", **kwargs)
+
+    written = db_module.save_failed_account(
+        "chatgpt", "keep@example.test", "Other123!",
+        failure_stage="created_oauth_failed", failure_reason="oauth boom",
+    )
+
+    overview = _overview("keep@example.test")
+    assert written is False
+    assert overview["lifecycle_status"] == "registered"
+    assert "failure_stage" not in overview
+
+
+def test_manual_reuse_oauth_failure_is_resumed_from_oauth_next_time(monkeypatch):
+    from core.registration.errors import RegistrationAttemptError
+
+    _manual_row("oauth-fail@example.test")
+    world = _manual_world(monkeypatch, outcomes=["unused", "ok"])
+
+    def _created_then_oauth_failed(platform):
+        raise RegistrationAttemptError(
+            "oauth failed",
+            stage="account_created",
+            failure_stage="created_oauth_failed",
+            email=world.attempts[-1]["email"],
+            password=world.attempts[-1]["password"],
+        )
+
+    # 只有浏览器执行器续做得了 OAuth；失败账号池还要求邮箱服务能按地址收信。
+    world.mailbox.can_read_address = lambda email: True
+    world.on_attempt = [_created_then_oauth_failed]
+    world.run(count=1, retry_count=0, max_attempts=1, executor_type="headless",
+              extra={"reuse_manual_invalid_emails": True})
+
+    overview = _overview("oauth-fail@example.test")
+    assert overview["lifecycle_status"] == "failed"
+    assert overview["failure_stage"] == "created_oauth_failed"
+
+    world.run(count=1, retry_count=0, executor_type="headless",
+              extra={"reuse_manual_invalid_emails": True})
+
+    assert world.emails[-1] == "oauth-fail@example.test"
+    resume = world.attempts[-1]["extra"].get("registration_resume") or {}
+    assert resume.get("stage") == "account_created"

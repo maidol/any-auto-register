@@ -387,10 +387,13 @@ def save_failed_account(
 
     同平台同邮箱已经有一条**不是**注册失败的账号时一律不碰：固定邮箱重跑时，
     一次失败的尝试不能把好账号改成注册失败，更不能换掉它的密码。
+    唯一的例外是手动添加的无效邮箱已经在平台侧建了号：它要变成「已建号」的
+    注册失败行，下次复用才会续做 OAuth，而不是再走一遍完整注册。
     返回是否写入。
     """
     from core.account_graph import load_account_graphs
     from core.base_platform import Account, AccountStatus
+    from core.registration.errors import FAILURE_CREATED, FAILURE_OAUTH
 
     with Session(engine) as session:
         existing = session.exec(
@@ -400,7 +403,12 @@ def save_failed_account(
         ).first()
         if existing is not None:
             graph = load_account_graphs(session, [int(existing.id)]).get(int(existing.id), {})
-            if graph.get("lifecycle_status") != AccountStatus.FAILED.value:
+            manual_invalid_created = (
+                failure_stage in (FAILURE_CREATED, FAILURE_OAUTH)
+                and graph.get("validity_status") == "invalid"
+                and (graph.get("overview") or {}).get("account_origin") == "manual"
+            )
+            if graph.get("lifecycle_status") != AccountStatus.FAILED.value and not manual_invalid_created:
                 return False
 
     save_account(Account(
