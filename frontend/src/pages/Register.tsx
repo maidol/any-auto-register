@@ -31,6 +31,7 @@ const DEFAULT_FORM: Record<string, any> = {
   chrome_cdp_url: '',
   mail_provider: '',
   sms_provider: '',
+  reuse_manual_invalid_emails: false,
 }
 
 function getProviderSetting(settings: ProviderSetting[] = [], providerKey: string) {
@@ -253,6 +254,7 @@ export default function Register() {
       oauth_email_hint: form.oauth_email_hint,
       chrome_user_data_dir: form.chrome_user_data_dir || undefined,
       chrome_cdp_url: form.chrome_cdp_url || undefined,
+      reuse_manual_invalid_emails: Boolean(form.reuse_manual_invalid_emails),
     }
     if (form.mail_provider) {
       extra.mail_provider = form.mail_provider
@@ -498,6 +500,20 @@ export default function Register() {
                   <p className="text-xs leading-5 text-[var(--text-muted)]">{currentMailboxProvider.description}</p>
                 ) : null}
                 {(currentMailboxProvider?.fields || []).map(renderProviderField)}
+                {form.platform === 'chatgpt' && (
+                  <label className="flex items-start gap-2 rounded-xl border border-[var(--border)] bg-[var(--bg-hover)] px-4 py-3 text-sm text-[var(--text-primary)]">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(form.reuse_manual_invalid_emails)}
+                      onChange={e => set('reuse_manual_invalid_emails', e.target.checked)}
+                      className="mt-0.5 accent-[var(--accent)]"
+                    />
+                    <span>
+                      <span className="block font-medium">复用未完成注册或手动添加的邮箱</span>
+                      <span className="mt-1 block text-xs text-[var(--text-muted)]">默认关闭；开启后优先复用账号列表中未完成注册的邮箱，其次复用手动添加且检测为无效的邮箱，并在所选邮箱服务中确认或创建该地址。</span>
+                    </span>
+                  </label>
+                )}
               </CardContent>
             </Card>
           )}
