@@ -273,3 +273,42 @@ def test_p4_sync_selected_skips_disabled_and_counts_it(monkeypatch):
     result = service.sync_selected(AccountExportSelection(platform="chatgpt", ids=[acc.id]))
     assert not any(item.id == acc.id for item in pushed_items)
     assert result["skipped"] == 1
+
+
+def test_failed_account_preserves_failure_stage_when_disabled_and_re_enabled():
+    from core.db import save_failed_account
+
+    save_failed_account(
+        "chatgpt",
+        "failed_preserve@example.com",
+        "pwd123",
+        failure_stage="created_oauth_failed",
+        failure_reason="oauth boom",
+    )
+
+    repo = AccountsRepository()
+    records = repo.select_for_export(
+        AccountExportSelection(platform="chatgpt", ids=[], select_all=True, status_filter="failed"),
+        include_failed=True,
+    )
+    acc = [a for a in records if a.email == "failed_preserve@example.com"][0]
+    assert acc.lifecycle_status == "failed"
+    assert acc.display_status == "failed"
+    assert acc.overview.get("failure_stage") == "created_oauth_failed"
+    assert acc.overview.get("failure_reason") == "oauth boom"
+
+    # 停用
+    repo.set_disabled(acc.id, disabled=True)
+    disabled_acc = repo.get(acc.id)
+    assert disabled_acc.lifecycle_status == "disabled"
+    assert disabled_acc.display_status == "disabled"
+
+    # 恢复启用
+    repo.set_disabled(acc.id, disabled=False)
+    enabled_acc = repo.get(acc.id)
+    assert enabled_acc.lifecycle_status == "failed"
+    assert enabled_acc.display_status == "failed"
+    assert enabled_acc.overview.get("failure_stage") == "created_oauth_failed"
+    assert enabled_acc.overview.get("failure_reason") == "oauth boom"
+    assert enabled_acc.plan_state != "disabled"
+

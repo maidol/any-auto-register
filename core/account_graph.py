@@ -165,7 +165,8 @@ def _derive_plan_state(
 ) -> str:
     if lifecycle_status == "disabled":
         return "disabled"
-    explicit = _normalize_plan_state(overview.get("plan_state"))
+    raw_plan_state = overview.get("plan_state")
+    explicit = _normalize_plan_state(raw_plan_state) if raw_plan_state != "disabled" else ""
     if explicit:
         return explicit
 
@@ -865,9 +866,10 @@ FAILURE_OVERVIEW_KEYS = ("failure_stage", "failure_reason", "failed_at", "mail_p
 
 
 def _drop_failure_markers(summary: dict[str, Any]) -> None:
-    """overview 是合并写的：账号离开 failed 状态时不显式删掉，
-    失败阶段和原因会原样留在一个已经注册成功的账号上。"""
-    if summary.get("lifecycle_status") == "failed":
+    """overview 是合并写的：账号离开 failed 状态且未处于 disabled 状态时不显式删掉，
+    失败阶段和原因会原样留在一个已经注册成功的账号上。
+    停用（disabled）是游离/冻结状态，必须保留原有的失败标记，供恢复启用时还原。"""
+    if summary.get("lifecycle_status") in ("failed", "disabled"):
         return
     for key in FAILURE_OVERVIEW_KEYS:
         summary.pop(key, None)
