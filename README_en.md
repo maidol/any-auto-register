@@ -238,6 +238,19 @@ A background lifecycle manager runs automatically:
 
 Manual triggers: `POST /api/lifecycle/{check|refresh|warn}`, `GET /api/lifecycle/status` for state.
 
+**Reset account reuse script (`tools/reset_account_reuse.py`)**:
+When an account reaches its reuse limit (default 3 attempts), use the maintenance script to reset reuse counters so it can participate in candidate reuse again (supports both lifecycle-failed rows and manual-invalid rows). Backup the database before applying changes (e.g., `cp data/account_manager.db data/account_manager.db.bak`):
+```bash
+# Dry run (default, print only without writing to database)
+.venv311/bin/python tools/reset_account_reuse.py a@example.com
+
+# Apply changes (reset reuse counters)
+.venv311/bin/python tools/reset_account_reuse.py --apply a@example.com
+
+# For failed rows, reset counter and update failure stage (e.g. resume directly from OAuth)
+.venv311/bin/python tools/reset_account_reuse.py --stage created_oauth_failed --apply a@example.com
+```
+
 ### Success-rate stats & error attribution
 
 - `GET /api/stats/overview` — global overview (totals, success rate, status distribution)

@@ -242,6 +242,19 @@ python3 -m uvicorn main:app --port 8000
 
 也可 API 手动触发:`POST /api/lifecycle/{check|refresh|warn}`,`GET /api/lifecycle/status` 查看状态。
 
+**复用计数重置运维脚本 (`tools/reset_account_reuse.py`)**:
+当账号达到复用上限（默认 3 次）时，可通过运维脚本清零复用计数使其能重新参与自动复用（支持注册失败行和手动添加的无效行）。写库前建议先备份数据库文件（如 `cp data/account_manager.db data/account_manager.db.bak`）：
+```bash
+# 试运行（默认，只打印不写库）
+.venv311/bin/python tools/reset_account_reuse.py a@example.com
+
+# 写入生效（清零复用计数）
+.venv311/bin/python tools/reset_account_reuse.py --apply a@example.com
+
+# 针对注册失败行，重置计数并指定失败阶段（如直接续做 OAuth）
+.venv311/bin/python tools/reset_account_reuse.py --stage created_oauth_failed --apply a@example.com
+```
+
 ### 注册成功率与错误归因
 
 - `GET /api/stats/overview` — 全局概览(总注册数、成功率、状态分布)
