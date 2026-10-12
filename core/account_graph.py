@@ -151,6 +151,8 @@ def _derive_plan_name(overview: dict[str, Any]) -> str:
 def _derive_validity_status(lifecycle_status: str, overview: dict[str, Any]) -> str:
     if lifecycle_status == "disabled":
         return "disabled"
+    if lifecycle_status == "failed":
+        return "unknown"
     if lifecycle_status == "invalid":
         return "invalid"
     if "valid" in overview:
@@ -194,6 +196,8 @@ def _derive_display_status(
 ) -> str:
     if lifecycle_status == "disabled":
         return "disabled"
+    if lifecycle_status == "failed":
+        return "failed"
     if validity_status == "invalid":
         return "invalid"
     if plan_state == "expired" or lifecycle_status == "expired":
@@ -960,7 +964,11 @@ def patch_account_graph(
     current = _graph_for_account(session, account_id)
     summary = _safe_dict(current.get("overview"))
     if summary_updates:
-        summary.update(summary_updates)
+        for k, v in summary_updates.items():
+            if v is None:
+                summary.pop(k, None)
+            else:
+                summary[k] = v
     if cashier_url is not None:
         summary["cashier_url"] = cashier_url
     if region is not None:

@@ -45,7 +45,8 @@ def _overview(email: str, platform: str = "chatgpt") -> dict:
         ).first()
         graph = load_account_graphs(session, [int(model.id)]).get(int(model.id), {})
     return {**(graph.get("overview") or {}), "lifecycle_status": graph.get("lifecycle_status"),
-            "validity_status": graph.get("validity_status")}
+            "validity_status": graph.get("validity_status"),
+            "display_status": graph.get("display_status")}
 
 
 def test_manual_invalid_candidates_require_manual_origin_invalid_status_and_password():
@@ -271,6 +272,7 @@ def test_created_failure_turns_manual_invalid_row_into_failed_row(stage):
     overview = _overview("created@example.test")
     assert written is True
     assert overview["lifecycle_status"] == "failed"
+    assert overview["display_status"] == "failed"
     assert overview["failure_stage"] == stage
     assert overview["account_origin"] == "manual"
     failed = {row["email"]: row for row in db_module.list_reusable_failed_accounts("chatgpt")}
