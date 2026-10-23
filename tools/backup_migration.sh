@@ -192,7 +192,7 @@ PY
 
 # Exclude generated and local-only files; keep every other project file, including untracked files and .env.
 tar -czf "$TEMP_ARCHIVE" \
-  --exclude-vcs \
+  --exclude='.git' --exclude='*/.git' \
   --exclude='*/.venv*' --exclude='*/node_modules' \
   --exclude='*/__pycache__' --exclude='*/.pytest_cache' --exclude='*/.mypy_cache' --exclude='*/.ruff_cache' \
   --exclude='*/logs' --exclude='*.pyc' --exclude='*.pyo' --exclude='*.log' \

@@ -104,7 +104,10 @@ def _run_backup(
 def test_backup_archives_untracked_project_files_and_sqlite_data(tmp_path: Path) -> None:
     project = tmp_path / "production"
     (project / "tools").mkdir(parents=True)
+    (project / "frontend").mkdir()
     (project / "docker-compose.yml").write_text("services:\n  app:\n    build: .\n")
+    (project / ".gitignore").write_text("local-only\n")
+    (project / "frontend" / ".gitignore").write_text("generated/\n")
     (project / "rebuild-my.sh").write_text("custom deployment helper\n")
     (project / ".git").mkdir()
     (project / ".git" / "config").write_text("not part of migration\n")
@@ -126,6 +129,8 @@ def test_backup_archives_untracked_project_files_and_sqlite_data(tmp_path: Path)
     with tarfile.open(archive, "r:gz") as bundle:
         names = set(bundle.getnames())
         assert "snapshot/rebuild-my.sh" in names
+        assert "snapshot/.gitignore" in names
+        assert "snapshot/frontend/.gitignore" in names
         assert "snapshot/data/account_manager.db" in names
         assert "extra/legacy-app-account_manager.db" in names
         assert not any(name.startswith("snapshot/.git/") for name in names)
@@ -135,6 +140,8 @@ def test_backup_archives_untracked_project_files_and_sqlite_data(tmp_path: Path)
         assert manifest is not None
         entries = manifest.read().decode()
         assert hashlib.sha256(b"custom deployment helper\n").hexdigest() in entries
+        manifest_paths = {item["path"] for item in json.loads(entries)["files"]}
+        assert {"snapshot/.gitignore", "snapshot/frontend/.gitignore"} <= manifest_paths
     assert "stop" in log.read_text()
     assert "start app" in log.read_text()
 
