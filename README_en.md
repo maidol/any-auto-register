@@ -209,6 +209,8 @@ Field formats are documented inline in the Settings editor — the backend rende
 
 By default the local Solver starts with the service and keeps one Camoufox browser running (about 400 MB of RAM). If you don't use it, add `- SOLVER_AUTOSTART=false` under `environment` in `docker-compose.yml` (`0` / `no` / `off` also work), then run `docker compose up -d` to recreate the container; from source, run `SOLVER_AUTOSTART=false python3 -m uvicorn main:app --port 8000`. Tasks that pick the local Solver still start it on demand, and "Restart Solver" in Settings keeps working.
 
+Camoufox installs the uBlock Origin add-on by default, so every browser runs an extra WebExtensions process (about 130 MB of RAM in one measurement, and loading its filter lists at startup costs noticeable CPU). If memory or CPU is tight, add `- CAMOUFOX_UBLOCK=false` under `environment` in `docker-compose.yml` (`0` / `no` / `off` also work), then run `docker compose up -d`; from source, run `CAMOUFOX_UBLOCK=false python3 -m uvicorn main:app --port 8000`. The switch currently applies only to the ChatGPT registration browser and the Temp-Mail Web mailbox browser; other platforms and the local Solver are unaffected. With it off, ads and trackers on pages load normally, so compare registration success rates with the switch on and off before keeping it off.
+
 ### Proxy pool
 
 - **Static proxies** — added manually on the Proxy page, weighted by success rate, auto-disabled after 5 consecutive failures

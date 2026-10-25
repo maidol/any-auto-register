@@ -21,6 +21,8 @@ services:
       # 可选：不用本地 Turnstile Solver 时取消下一行注释，开机不再常驻 Camoufox 浏览器（约 400MB 内存）；
       # 选用「本地 Solver」的任务仍会按需启动它
       # - SOLVER_AUTOSTART=false
+      # 可选：Camoufox 浏览器不装默认自带的 uBlock Origin 插件，每个浏览器少一个 WebExtensions 进程（约 130MB 内存）
+      # - CAMOUFOX_UBLOCK=false
       # 可选：设置访问密码，不设置则无密码保护
       # - APP_PASSWORD=changeme
       # 可选：设置 VNC 密码

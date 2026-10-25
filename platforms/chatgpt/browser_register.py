@@ -11,6 +11,8 @@ from urllib.parse import urljoin, urlparse
 
 from camoufox.sync_api import Camoufox
 
+from core.camoufox_addons import apply_ublock_switch
+
 from core.base_sms import HeroSmsCodeTimeoutError
 
 from core.registration.errors import (
@@ -4349,6 +4351,7 @@ class ChatGPTBrowserRegister:
             if proxy:
                 launch_opts["proxy"] = proxy
                 launch_opts["geoip"] = True
+            apply_ublock_switch(launch_opts)
 
             progress: dict = {}
             with Camoufox(**launch_opts) as browser:
@@ -4442,6 +4445,7 @@ class ChatGPTBrowserRegister:
         launch_opts = {"headless": self.headless}
         if proxy:
             launch_opts["proxy"] = proxy
+        apply_ublock_switch(launch_opts)
         while True:
             try:
                 with Camoufox(**launch_opts) as browser:

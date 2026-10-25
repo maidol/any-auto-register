@@ -209,6 +209,8 @@ python3 -m uvicorn main:app --port 8000
 
 本地 Solver 默认随服务启动，并常驻一个 Camoufox 浏览器（约 400MB 内存）。不用本地 Solver 时，在 `docker-compose.yml` 的 `environment` 里加 `- SOLVER_AUTOSTART=false`（也认 `0` / `no` / `off`），再执行 `docker compose up -d` 按新配置重建容器；源码运行时用 `SOLVER_AUTOSTART=false python3 -m uvicorn main:app --port 8000`。关闭后，选用「本地 Solver」的任务仍会在需要时自动拉起它，「全局配置」页的「重启 Solver」也照常可用。
 
+Camoufox 默认会装 uBlock Origin 插件，每个浏览器因此多一个 WebExtensions 进程（实测约 130MB 内存，启动时加载过滤规则也比较吃 CPU）。内存或 CPU 紧张时，可以在 `docker-compose.yml` 的 `environment` 里加 `- CAMOUFOX_UBLOCK=false`（也认 `0` / `no` / `off`），再执行 `docker compose up -d`；源码运行时用 `CAMOUFOX_UBLOCK=false python3 -m uvicorn main:app --port 8000`。这个开关目前只作用于 ChatGPT 注册浏览器和 Temp-Mail Web 邮箱浏览器，其他平台和本地 Solver 不受影响。关闭后页面里的广告和跟踪脚本会照常加载，建议先对比开关前后的注册成功率，再决定是否长期关闭。
+
 ### 代理池
 
 | 🌟 推荐代理服务 | 简介说明 |

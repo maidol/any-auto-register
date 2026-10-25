@@ -771,6 +771,7 @@ class TempMailWebMailbox(BaseMailbox):
         if self._page is not None:
             return self._page
         from camoufox.sync_api import Camoufox
+        from core.camoufox_addons import apply_ublock_switch
 
         launch_opts = {"headless": True}
         if self.proxy:
@@ -785,6 +786,7 @@ class TempMailWebMailbox(BaseMailbox):
             else:
                 launch_opts["proxy"] = {"server": self.proxy}
             launch_opts["geoip"] = True
+        apply_ublock_switch(launch_opts)
         self._browser = Camoufox(**launch_opts)
         browser = self._browser.__enter__()
         self._page = browser.new_page()
