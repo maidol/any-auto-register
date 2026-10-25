@@ -18,6 +18,9 @@ services:
       - VPN_GATE_REFRESH_TIME=00:00
       - VPN_GATE_REFRESH_TIMEZONE=Asia/Shanghai
       - VPN_GATE_REFRESH_RETRIES=3
+      # 可选：不用本地 Turnstile Solver 时取消下一行注释，开机不再常驻 Camoufox 浏览器（约 400MB 内存）；
+      # 选用「本地 Solver」的任务仍会按需启动它
+      # - SOLVER_AUTOSTART=false
       # 可选：设置访问密码，不设置则无密码保护
       # - APP_PASSWORD=changeme
       # 可选：设置 VNC 密码

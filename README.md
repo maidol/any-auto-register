@@ -207,6 +207,8 @@ python3 -m uvicorn main:app --port 8000
 | 2Captcha | 填写 API Key,在 [2captcha.com](https://2captcha.com) 注册获取 |
 | 本地 Solver | Camoufox 本地解码,需先执行 `python3 -m camoufox fetch` |
 
+本地 Solver 默认随服务启动，并常驻一个 Camoufox 浏览器（约 400MB 内存）。不用本地 Solver 时，在 `docker-compose.yml` 的 `environment` 里加 `- SOLVER_AUTOSTART=false`（也认 `0` / `no` / `off`），再执行 `docker compose up -d` 按新配置重建容器；源码运行时用 `SOLVER_AUTOSTART=false python3 -m uvicorn main:app --port 8000`。关闭后，选用「本地 Solver」的任务仍会在需要时自动拉起它，「全局配置」页的「重启 Solver」也照常可用。
+
 ### 代理池
 
 | 🌟 推荐代理服务 | 简介说明 |

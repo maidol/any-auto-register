@@ -224,7 +224,24 @@ def restart():
     start()
 
 
+_AUTOSTART_OFF_VALUES = {"0", "false", "no", "off"}
+
+
+def autostart_enabled() -> bool:
+    """SOLVER_AUTOSTART 为 false/0/no/off（不分大小写）时关闭开机自启，其余情况开启。
+
+    只管 main.py 开机时的自启；选用本地 Solver 的任务仍通过 start() 按需拉起，
+    「重启 Solver」接口也不受影响。
+    """
+    value = os.environ.get("SOLVER_AUTOSTART", "")
+    return value.strip().lower() not in _AUTOSTART_OFF_VALUES
+
+
 def start_async():
-    """在后台线程启动，不阻塞主进程"""
+    """在后台线程启动，不阻塞主进程。SOLVER_AUTOSTART 关闭时跳过，返回 None。"""
+    if not autostart_enabled():
+        safe_print("[Solver] SOLVER_AUTOSTART 已关闭，跳过开机自启（选用本地 Solver 的任务仍会按需启动）")
+        return None
     t = threading.Thread(target=start, daemon=True)
     t.start()
+    return t

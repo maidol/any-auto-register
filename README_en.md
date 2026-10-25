@@ -207,6 +207,8 @@ Field formats are documented inline in the Settings editor — the backend rende
 | 2Captcha | Sign up at [2captcha.com](https://2captcha.com) for an API Key |
 | Local Solver | Camoufox local solver, run `python3 -m camoufox fetch` first |
 
+By default the local Solver starts with the service and keeps one Camoufox browser running (about 400 MB of RAM). If you don't use it, add `- SOLVER_AUTOSTART=false` under `environment` in `docker-compose.yml` (`0` / `no` / `off` also work), then run `docker compose up -d` to recreate the container; from source, run `SOLVER_AUTOSTART=false python3 -m uvicorn main:app --port 8000`. Tasks that pick the local Solver still start it on demand, and "Restart Solver" in Settings keeps working.
+
 ### Proxy pool
 
 - **Static proxies** — added manually on the Proxy page, weighted by success rate, auto-disabled after 5 consecutive failures
