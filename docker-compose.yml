@@ -1,6 +1,8 @@
 services:
   app:
     build: .
+    # tini 当容器 1 号进程，回收 Camoufox 退出后留下的子进程（不开时它们会变成僵尸进程越积越多）
+    init: true
     ports:
       - "8000:8000"   # FastAPI / Web UI
       - "6080:6080"   # noVNC (headed 浏览器预览)
