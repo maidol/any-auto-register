@@ -74,6 +74,9 @@ RUN chmod +x /docker-entrypoint.sh
 # 不设置则无密码保护（适用于本地使用）
 ENV APP_PASSWORD=""
 
+# Python 输出不缓冲：print 立即进 docker logs（否则要攒满约 8KB 才写出）
+ENV PYTHONUNBUFFERED=1
+
 EXPOSE 8000 6080 8889
 
 ENTRYPOINT ["/docker-entrypoint.sh"]
